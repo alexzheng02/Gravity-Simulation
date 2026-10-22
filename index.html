@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GravityLab</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+    <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+            <h1>GravityLab</h1>
+            <p>Interactive N-body gravity simulator</p>
+        </div>
+    </div>
+    <div class="scenario-picker">
+        <label for="scenarioSelect">Scenario</label>
+        <select id="scenarioSelect">
+            <option value="solar">Solar System</option>
+            <option value="sunPlanet">Star &amp; Planet</option>
+            <option value="binary">Binary Stars</option>
+            <option value="figure8">Figure-8 (three bodies)</option>
+            <option value="slingshot">Gravity Assist</option>
+            <option value="blackhole">Black Hole Disk</option>
+            <option value="cluster">Random Cluster</option>
+            <option value="empty">Empty Space</option>
+        </select>
+    </div>
+</header>
+
+<main class="app-layout">
+
+    <section class="universe-container">
+
+        <div class="canvas-wrap">
+            <canvas id="universe"></canvas>
+
+            <div class="hud" id="hud"></div>
+
+            <div class="scenario-note" id="scenarioNote"></div>
+
+            <div class="canvas-hint">
+                <b>Drag</b> to throw a body &middot;
+                <b>Click</b> empty space for an automatic orbit &middot;
+                <b>Scroll</b> to zoom &middot;
+                <b>Right-drag</b> to pan
+            </div>
+        </div>
+
+        <div class="simulation-controls">
+            <button id="playPauseBtn" class="primary">Pause</button>
+            <button id="resetBtn">Reset</button>
+            <button id="clearTrailsBtn">Clear Trails</button>
+            <button id="centerViewBtn">Fit View</button>
+
+            <label class="inline">
+                Speed
+                <input type="range" id="speedSlider" min="0.1" max="5" step="0.1" value="1">
+                <span id="speedValue">1.0x</span>
+            </label>
+
+            <label class="inline">
+                Camera
+                <select id="cameraSelect">
+                    <option value="free">Free</option>
+                    <option value="com">Follow center of mass</option>
+                    <option value="selected">Follow selected body</option>
+                </select>
+            </label>
+        </div>
+
+        <div class="brush-bar">
+            <span class="brush-label">Place:</span>
+            <button class="brush active" data-type="planet">
+                <span class="swatch planet"></span>Planet <kbd>1</kbd>
+            </button>
+            <button class="brush" data-type="star">
+                <span class="swatch star"></span>Star <kbd>2</kbd>
+            </button>
+            <button class="brush" data-type="moon">
+                <span class="swatch moon"></span>Moon <kbd>3</kbd>
+            </button>
+            <button class="brush" data-type="blackhole">
+                <span class="swatch blackhole"></span>Black Hole <kbd>4</kbd>
+            </button>
+        </div>
+
+    </section>
+
+    <aside class="control-panel">
+
+        <section class="panel-section">
+            <h2>Physics</h2>
+
+            <label class="field">
+                Integrator (how time steps forward)
+                <select id="integratorSelect">
+                    <option value="verlet">Velocity Verlet (stable)</option>
+                    <option value="euler">Euler (simple, drifts)</option>
+                </select>
+            </label>
+
+            <div class="toggles">
+                <label><input type="checkbox" id="trailToggle" checked> Trails</label>
+                <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
+                <label><input type="checkbox" id="fieldToggle"> Gravity field</label>
+                <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
+                <label><input type="checkbox" id="labelToggle" checked> Labels</label>
+            </div>
+
+            <p class="legend-note hidden" id="vectorLegend">
+                <span class="dot" style="background:#4ade80"></span>velocity
+                <span class="dot" style="background:#fb923c"></span>acceleration (gravity)
+                <br>Arrow lengths are scaled down to fit on screen.
+            </p>
+        </section>
+
+        <section class="panel-section">
+            <h2>Energy</h2>
+            <canvas id="energyChart"></canvas>
+            <div class="energy-legend">
+                <span><i style="background:#38bdf8"></i>Kinetic</span>
+                <span><i style="background:#f87171"></i>Potential</span>
+                <span><i style="background:#f8fafc"></i>Total</span>
+            </div>
+            <p class="drift">
+                Total energy drift: <b id="driftValue">0.000%</b>
+            </p>
+        </section>
+
+        <section class="panel-section">
+            <h2>Bodies <span class="count" id="bodyCount"></span></h2>
+            <div id="bodyList"></div>
+        </section>
+
+        <section class="panel-section">
+            <h2>Selected Body</h2>
+
+            <p id="selectedBodyName" class="muted">Click a body to inspect it</p>
+
+            <div id="bodyProperties" class="hidden">
+
+                <label class="field">
+                    Mass <span id="massValue" class="value"></span>
+                    <input type="range" id="massSlider" min="0" max="1000" step="1">
+                </label>
+
+                <label class="field">
+                    Radius <span id="radiusValue" class="value"></span>
+                    <input type="range" id="radiusSlider" min="2" max="60" step="1">
+                </label>
+
+                <div class="two-col">
+                    <label class="field">
+                        Velocity X
+                        <input type="number" id="vxInput" step="0.1">
+                    </label>
+                    <label class="field">
+                        Velocity Y
+                        <input type="number" id="vyInput" step="0.1">
+                    </label>
+                </div>
+
+                <p class="muted small">Speed: <b id="speedReadout">0</b></p>
+
+                <div class="two-col">
+                    <button id="orbitBtn">Make it orbit</button>
+                    <button id="deleteBodyBtn" class="danger">Delete</button>
+                </div>
+
+            </div>
+        </section>
+
+        <details class="panel-section explainer">
+            <summary>How it works</summary>
+
+            <h3>1. Newton's law of gravity</h3>
+            <p>
+                Every body pulls on every other body. The pull from a body
+                of mass <i>M</i> at distance <i>r</i> gives an acceleration of
+                <code>a = G&middot;M / r&sup2;</code>, pointing toward it.
+                Each body adds up the pulls from all the others. We visit
+                each <em>pair</em> only once and apply equal and opposite
+                forces (Newton's third law), which halves the work.
+            </p>
+
+            <h3>2. Stepping through time</h3>
+            <p>
+                A computer can't run time continuously, so we take tiny
+                steps of length <code>dt</code>.
+            </p>
+            <p>
+                <b>Euler</b> moves each body using its current velocity, then
+                updates the velocity. It's simple, but every step adds a little
+                energy, so orbits slowly spiral outward.
+            </p>
+            <p>
+                <b>Velocity Verlet</b> does a half-step "kick" to the velocity,
+                moves ("drift"), recomputes gravity, then does the second
+                half-kick. It's <em>symplectic</em>: it preserves the geometry of
+                the motion, so energy errors stay tiny and don't grow. Switch
+                integrators and watch the energy graph.
+            </p>
+
+            <h3>3. Energy</h3>
+            <p>
+                Kinetic energy is <code>&frac12;mv&sup2;</code> and gravitational
+                potential energy is <code>&minus;G&middot;m&#8321;m&#8322; / r</code>.
+                With nothing outside the system, their sum should stay constant.
+                The white line on the graph is that total. A flat line means the
+                simulation is trustworthy.
+            </p>
+
+            <h3>4. Softening</h3>
+            <p>
+                Real gravity becomes infinite when two bodies touch
+                (<i>r</i> &rarr; 0). We use <code>r&sup2; + &epsilon;&sup2;</code>
+                with a small &epsilon; so very close passes don't explode.
+            </p>
+
+            <h3>5. Collisions</h3>
+            <p>
+                When two bodies touch they merge. Mass and momentum are
+                conserved exactly, but some kinetic energy turns into heat,
+                so the energy graph marks each merge with a dashed line.
+            </p>
+
+            <h3>6. The gravity field</h3>
+            <p>
+                The glow shows how deep the gravitational "well" is at each
+                point. The rings are lines of equal potential: a body released
+                at rest falls straight across them, downhill.
+            </p>
+        </details>
+
+    </aside>
+
+</main>
+
+<script src="script.js"></script>
+
+</body>
+</html>
