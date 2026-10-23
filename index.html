@@ -42,12 +42,7 @@
 
             <div class="scenario-note" id="scenarioNote"></div>
 
-            <div class="canvas-hint">
-                <b>Drag</b> to throw a body &middot;
-                <b>Click</b> empty space for an automatic orbit &middot;
-                <b>Scroll</b> to zoom &middot;
-                <b>Right-drag</b> to pan
-            </div>
+            <div class="canvas-hint" id="canvasHint"></div>
         </div>
 
         <div class="simulation-controls">
@@ -73,8 +68,14 @@
         </div>
 
         <div class="brush-bar">
-            <span class="brush-label">Place:</span>
-            <button class="brush active" data-type="planet">
+            <span class="brush-label">Tool:</span>
+            <button class="brush active" data-type="select">
+                <svg class="cursor-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                    <path d="M2 1 L10 6.2 L6.4 7 L4.6 11 Z" fill="currentColor"/>
+                </svg>Select / Pan <kbd>Esc</kbd>
+            </button>
+            <span class="brush-divider" aria-hidden="true"></span>
+            <button class="brush" data-type="planet">
                 <span class="swatch planet"></span>Planet <kbd>1</kbd>
             </button>
             <button class="brush" data-type="star">
@@ -104,6 +105,9 @@
             </label>
 
             <div class="toggles">
+                <label title="Pauses the simulation while you drag a slider or type in a box, then resumes">
+                    <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
+                </label>
                 <label><input type="checkbox" id="trailToggle" checked> Trails</label>
                 <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
                 <label><input type="checkbox" id="fieldToggle"> Gravity field</label>
@@ -143,15 +147,21 @@
 
             <div id="bodyProperties" class="hidden">
 
-                <label class="field">
-                    Mass <span id="massValue" class="value"></span>
-                    <input type="range" id="massSlider" min="0" max="1000" step="1">
-                </label>
+                <div class="field">
+                    <label for="massInput">Mass</label>
+                    <div class="slider-row">
+                        <input type="range" id="massSlider" min="0" max="1000" step="1" aria-label="Mass slider">
+                        <input type="number" id="massInput" min="0.01" max="1000000" step="any">
+                    </div>
+                </div>
 
-                <label class="field">
-                    Radius <span id="radiusValue" class="value"></span>
-                    <input type="range" id="radiusSlider" min="2" max="60" step="1">
-                </label>
+                <div class="field">
+                    <label for="radiusInput">Radius</label>
+                    <div class="slider-row">
+                        <input type="range" id="radiusSlider" min="1" max="60" step="0.5" aria-label="Radius slider">
+                        <input type="number" id="radiusInput" min="1" max="60" step="0.5">
+                    </div>
+                </div>
 
                 <div class="two-col">
                     <label class="field">
@@ -232,7 +242,9 @@
             <p>
                 The glow shows how deep the gravitational "well" is at each
                 point. The rings are lines of equal potential: a body released
-                at rest falls straight across them, downhill.
+                at rest falls straight across them, downhill. Gravity has no
+                edge; it reaches forever and just gets weaker, so the glow fades
+                out smoothly instead of stopping.
             </p>
         </details>
 

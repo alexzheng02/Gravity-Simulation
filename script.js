@@ -56,11 +56,25 @@ let typeCounters = {};
 let currentScenario = "solar";
 
 const options = {
+    autoPause: false,
     trails: true,
     vectors: false,
     field: false,
     merge: true,
     labels: true
+};
+
+/*
+ * Editing state, for "Auto-pause while editing".
+ * `sources` holds whatever is being edited right now (a slider being dragged,
+ * a number box with the cursor in it). The simulation pauses when the first
+ * edit starts and resumes when the last one ends, but only if the auto-pause
+ * is what paused it.
+ */
+const editState = {
+    sources: new Set(),
+    target: null,        // the body the edit started on
+    pausedByEdit: false
 };
 
 // Energy tracking
@@ -80,7 +94,7 @@ let pixelRatio = 1;
 
 const camera = { x: 0, y: 0, zoom: 1, follow: "free" };
 
-let brush = "planet";   // which body type the mouse places
+let brush = null;       // null = Select / Pan tool; otherwise the body type being placed
 let pointer = null;     // what the mouse is currently doing (placing or panning)
 let effects = [];       // collision flashes
 let starfieldPattern = null;
@@ -88,6 +102,7 @@ let starfieldPattern = null;
 const fieldCanvas = document.createElement("canvas");
 const fieldCtx = fieldCanvas.getContext("2d");
 let fieldImage = null;
+let fieldLevels = new Float32Array(0);
 
 
 /* ==========================================================================
@@ -647,6 +662,9 @@ function loadScenario(name) {
     pendingEnergyEvent = false;
     accelerationsFresh = false;
     pointer = null;
+    editState.sources.clear();
+    editState.target = null;
+    editState.pausedByEdit = false;
 
     scenario.build();
     zeroMomentum();
@@ -804,13 +822,28 @@ function drawStarfield() {
     ctx.fillRect(-canvas.width, -canvas.height, canvas.width * 3, canvas.height * 3);
 }
 
+function smoothstep(edge0, edge1, x) {
+    const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+}
+
 /*
  * Gravity field: for a grid of points, add up the gravitational potential
  * (G * M / r) from every body. Bright = deep gravity well.
- * The rings are equipotential lines.
+ * The rings are equipotential lines (points with equal potential).
+ *
+ * Gravity has no edge: it reaches forever and just gets weaker. To keep it
+ * fast we calculate one value per small square of pixels, then let the
+ * browser blend the squares together smoothly.
  */
+const RINGS_PER_LEVEL = 2;
+
 function drawField() {
-    const cell = 4;
+    const n = bodies.length;
+
+    // Square size is chosen so the total work (squares x bodies) stays about
+    // the same: small squares with few bodies, bigger ones with many.
+    const cell = clamp(Math.ceil(Math.sqrt(viewWidth * viewHeight * n / 300000)), 3, 8);
     const cols = Math.ceil(viewWidth / cell);
     const rows = Math.ceil(viewHeight / cell);
 
@@ -819,11 +852,12 @@ function drawField() {
         fieldCanvas.height = rows;
         fieldImage = fieldCtx.createImageData(cols, rows);
     }
+    if (fieldLevels.length !== cols * rows) fieldLevels = new Float32Array(cols * rows);
 
-    const data = fieldImage.data;
     const eps2 = 15 * 15;
-    const n = bodies.length;
 
+    // Pass 1: how deep is the gravity well at each square?
+    // Logarithmic scale: each level up is a doubling of well depth.
     for (let row = 0; row < rows; row++) {
         const wy = ((row + 0.5) * cell - viewHeight / 2) / camera.zoom + camera.y;
 
@@ -838,16 +872,40 @@ function drawField() {
                 potential += b.mass / Math.sqrt(dx * dx + dy * dy + eps2);
             }
 
-            // Logarithmic scale: each step up is a doubling of well depth
-            const level = Math.log2(1 + G * potential);   // ~3 (far away) .. ~11 (next to a black hole)
+            fieldLevels[row * cols + col] = Math.log2(1 + G * potential);
+        }
+    }
+
+    // Pass 2: colour, plus smooth (anti-aliased) equipotential rings
+    const data = fieldImage.data;
+
+    for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+            const k = row * cols + col;
+            const level = fieldLevels[k];
+
+            // How fast the level changes from one square to the next
+            const left = fieldLevels[col > 0 ? k - 1 : k];
+            const right = fieldLevels[col < cols - 1 ? k + 1 : k];
+            const up = fieldLevels[row > 0 ? k - cols : k];
+            const down = fieldLevels[row < rows - 1 ? k + cols : k];
+            const ringsPerSquare = Math.hypot(right - left, down - up) / 2 * RINGS_PER_LEVEL + 1e-6;
+
+            // Distance to the nearest ring, measured in squares, so every
+            // ring is drawn with the same soft width wherever it is
+            const ringPosition = level * RINGS_PER_LEVEL;
+            const fraction = ringPosition - Math.floor(ringPosition);
+            const distance = Math.min(fraction, 1 - fraction) / ringsPerSquare;
+
+            let line = clamp(1 - distance / 0.8, 0, 1);
+            // Fade out rings that would be packed too tightly to see (e.g. zoomed out near a star)
+            line *= smoothstep(2.5, 6, 1 / ringsPerSquare);
+            // Fade out the faint outermost rings
+            line *= smoothstep(3.2, 4, level) * 0.75;
+
             const t = clamp((level - 3) / 8, 0, 1);
 
-            // Equipotential rings: a soft line every half level
-            const ring = level * 2 - Math.floor(level * 2);
-            const edge = Math.min(ring, 1 - ring);
-            const line = level > 3.5 && edge < 0.06 ? (1 - edge / 0.06) * 0.8 : 0;
-
-            const i = (row * cols + col) * 4;
+            const i = k * 4;
             data[i] = 40 + 160 * t * t + line * 90;
             data[i + 1] = 25 + 70 * t * t * t + line * 90;
             data[i + 2] = 90 + 160 * t + line * 70;
@@ -858,6 +916,7 @@ function drawField() {
     fieldCtx.putImageData(fieldImage, 0, 0);
     useScreenTransform();
     ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(fieldCanvas, 0, 0, cols * cell, rows * cell);
 }
 
@@ -1256,6 +1315,13 @@ function render() {
    6. CONTROLS
    ========================================================================== */
 
+const massSlider = document.getElementById("massSlider");
+const massInput = document.getElementById("massInput");
+const radiusSlider = document.getElementById("radiusSlider");
+const radiusInput = document.getElementById("radiusInput");
+const vxInput = document.getElementById("vxInput");
+const vyInput = document.getElementById("vyInput");
+
 function formatMass(m) {
     if (m >= 1000) return Math.round(m).toLocaleString();
     if (m >= 10) return m.toFixed(0);
@@ -1322,12 +1388,19 @@ function updateProperties() {
     name.textContent = selectedBody.name + " (" + BODY_TYPES[selectedBody.type].label + ")";
     name.classList.remove("muted");
 
-    document.getElementById("massSlider").value = sliderFromMass(selectedBody.mass);
-    document.getElementById("massValue").textContent = formatMass(selectedBody.mass);
-    document.getElementById("radiusSlider").value = selectedBody.radius;
-    document.getElementById("radiusValue").textContent = Math.round(selectedBody.radius);
+    // Don't overwrite a box the user is typing in
+    const focused = document.activeElement;
+    massSlider.value = sliderFromMass(selectedBody.mass);
+    radiusSlider.value = selectedBody.radius;
+    if (focused !== massInput) massInput.value = formatNumber(selectedBody.mass);
+    if (focused !== radiusInput) radiusInput.value = formatNumber(selectedBody.radius);
 
     refreshLiveReadouts(true);
+}
+
+// Short readable number for the input boxes, e.g. 10000, 3.5, 0.25
+function formatNumber(value) {
+    return String(Number(value.toPrecision(4)));
 }
 
 // Numbers that change every frame
@@ -1353,8 +1426,9 @@ function refreshLiveReadouts(force = false) {
     }
 
     const integratorName = integrator === "verlet" ? "Velocity Verlet" : "Euler";
+    const pauseText = running ? "" : editState.pausedByEdit ? "PAUSED while editing · " : "PAUSED · ";
     document.getElementById("hud").textContent =
-        (running ? "" : "PAUSED · ") +
+        pauseText +
         "t = " + simTime.toFixed(1) +
         " · " + bodies.length + " bodies · " + integratorName +
         " · " + simulationSpeed.toFixed(1) + "x";
@@ -1366,14 +1440,88 @@ function updatePlayButton() {
 
 function togglePlay() {
     running = !running;
+    // The user took control, so an edit ending shouldn't resume on its own
+    editState.pausedByEdit = false;
     updatePlayButton();
 }
 
+// ---------- Auto-pause while editing ----------
+
+function beginEdit(source) {
+    if (editState.sources.size === 0) {
+        editState.target = selectedBody;
+        if (options.autoPause && running) {
+            running = false;
+            editState.pausedByEdit = true;
+            updatePlayButton();
+        }
+    }
+    editState.sources.add(source);
+}
+
+function endEdit(source) {
+    if (!editState.sources.delete(source)) return;
+    if (editState.sources.size > 0) return;
+
+    editState.target = null;
+    if (editState.pausedByEdit && !running) {
+        running = true;
+        updatePlayButton();
+    }
+    editState.pausedByEdit = false;
+}
+
+/*
+ * The body that edits should apply to. If the body you started editing
+ * merged into another one mid-edit, edits are ignored, so you can never
+ * accidentally change a different body (e.g. the star it crashed into).
+ */
+function editableBody() {
+    if (!selectedBody || !bodies.includes(selectedBody)) return null;
+    if (editState.sources.size > 0 && editState.target !== selectedBody) return null;
+    return selectedBody;
+}
+
+// ---------- Tools (Select / Pan, or placing a body type) ----------
+
+// Picking the active tool again, or "select", goes back to Select / Pan
 function setBrush(type) {
-    brush = type;
+    brush = type === "select" || type === brush ? null : type;
+
     document.querySelectorAll(".brush").forEach(btn => {
-        btn.classList.toggle("active", btn.dataset.type === type);
+        btn.classList.toggle("active", btn.dataset.type === (brush ?? "select"));
     });
+
+    if (pointer && pointer.mode === "place") pointer = null;
+    updateCursor();
+    updateHint();
+}
+
+function updateHint() {
+    const hint = document.getElementById("canvasHint");
+    if (brush) {
+        hint.innerHTML =
+            "<b>Drag</b> to throw a " + BODY_TYPES[brush].label.toLowerCase() + " &middot; " +
+            "<b>Click</b> for an automatic orbit &middot; " +
+            "<b>Right-drag</b> to pan &middot; " +
+            "<b>Esc</b> to stop placing";
+    } else {
+        hint.innerHTML =
+            "<b>Drag</b> to pan &middot; " +
+            "<b>Click</b> a body to inspect it &middot; " +
+            "<b>Scroll</b> to zoom &middot; " +
+            "Pick a body type below to start placing";
+    }
+}
+
+function updateCursor(hovering = false) {
+    if (pointer && pointer.mode === "pan" && pointer.moved) {
+        canvas.style.cursor = "grabbing";
+    } else if (hovering) {
+        canvas.style.cursor = "pointer";
+    } else {
+        canvas.style.cursor = brush ? "crosshair" : "grab";
+    }
 }
 
 function deleteSelected() {
@@ -1407,36 +1555,66 @@ function setCameraFollow(mode) {
 
 // ---------- Mouse / touch on the canvas ----------
 
+/*
+ * Left button:
+ *   - on a body: select it
+ *   - Select / Pan tool: drag to pan, click empty space to deselect
+ *   - a body type chosen: drag to throw, click for an automatic orbit
+ * Right or middle button: always pans
+ */
+function startPan(screen, clickDeselects) {
+    pointer = { mode: "pan", startScreen: screen, lastScreen: screen, moved: false, clickDeselects };
+}
+
 canvas.addEventListener("pointerdown", event => {
     const screen = eventPosition(event);
-    const world = screenToWorld(screen.x, screen.y);
 
     if (event.button === 1 || event.button === 2) {
-        pointer = { mode: "pan", lastScreen: screen };
-        setCameraFollow("free");
+        startPan(screen, false);
     } else if (event.button === 0) {
         const hit = bodyAtScreen(screen.x, screen.y);
         if (hit) {
             selectBody(hit);
             return;
         }
-        pointer = {
-            mode: "place",
-            start: world,
-            current: world,
-            startScreen: screen,
-            currentScreen: screen
-        };
+
+        if (brush) {
+            const world = screenToWorld(screen.x, screen.y);
+            pointer = {
+                mode: "place",
+                start: world,
+                current: world,
+                startScreen: screen,
+                currentScreen: screen
+            };
+        } else {
+            startPan(screen, true);
+        }
+    } else {
+        return;
     }
 
     canvas.setPointerCapture(event.pointerId);
 });
 
 canvas.addEventListener("pointermove", event => {
-    if (!pointer) return;
     const screen = eventPosition(event);
 
+    if (!pointer) {
+        updateCursor(bodyAtScreen(screen.x, screen.y) !== null);
+        return;
+    }
+
     if (pointer.mode === "pan") {
+        // Only count it as a pan once the mouse has moved a few pixels,
+        // so a plain click doesn't count as a pan
+        if (!pointer.moved) {
+            const distance = Math.hypot(screen.x - pointer.startScreen.x, screen.y - pointer.startScreen.y);
+            if (distance < 4) return;
+            pointer.moved = true;
+            setCameraFollow("free");
+            updateCursor();
+        }
         camera.x -= (screen.x - pointer.lastScreen.x) / camera.zoom;
         camera.y -= (screen.y - pointer.lastScreen.y) / camera.zoom;
         pointer.lastScreen = screen;
@@ -1459,12 +1637,16 @@ canvas.addEventListener("pointerup", () => {
         bodies.push(body);
         markSystemChanged();
         selectBody(body);
+    } else if (pointer && pointer.mode === "pan" && pointer.clickDeselects && !pointer.moved) {
+        selectBody(null);
     }
     pointer = null;
+    updateCursor();
 });
 
 canvas.addEventListener("pointercancel", () => {
     pointer = null;
+    updateCursor();
 });
 
 canvas.addEventListener("contextmenu", event => event.preventDefault());
@@ -1514,6 +1696,7 @@ document.getElementById("integratorSelect").onchange = event => {
 };
 
 const toggles = {
+    autoPauseToggle: "autoPause",
     trailToggle: "trails",
     vectorToggle: "vectors",
     fieldToggle: "field",
@@ -1535,28 +1718,108 @@ document.querySelectorAll(".brush").forEach(btn => {
     btn.onclick = () => setBrush(btn.dataset.type);
 });
 
-document.getElementById("massSlider").oninput = event => {
-    if (!selectedBody) return;
-    selectedBody.mass = massFromSlider(Number(event.target.value));
-    document.getElementById("massValue").textContent = formatMass(selectedBody.mass);
+// ---------- Mass, radius and velocity editing ----------
+
+const MIN_MASS = 0.01;
+const MAX_MASS = 1000000;
+const MIN_RADIUS = 1;
+const MAX_RADIUS = 60;
+
+function setMass(body, mass, from) {
+    body.mass = clamp(mass, MIN_MASS, MAX_MASS);
+    if (from !== "slider") massSlider.value = sliderFromMass(body.mass);
+    if (from !== "box") massInput.value = formatNumber(body.mass);
     markSystemChanged();
     refreshBodyList();
-};
+}
 
-document.getElementById("radiusSlider").oninput = event => {
-    if (!selectedBody) return;
-    selectedBody.radius = Number(event.target.value);
-    document.getElementById("radiusValue").textContent = selectedBody.radius;
-};
+function setRadius(body, radius, from) {
+    body.radius = clamp(radius, MIN_RADIUS, MAX_RADIUS);
+    if (from !== "slider") radiusSlider.value = body.radius;
+    if (from !== "box") radiusInput.value = formatNumber(body.radius);
+}
+
+massSlider.addEventListener("input", () => {
+    const body = editableBody();
+    if (body) setMass(body, massFromSlider(Number(massSlider.value)), "slider");
+});
+
+radiusSlider.addEventListener("input", () => {
+    const body = editableBody();
+    if (body) setRadius(body, Number(radiusSlider.value), "slider");
+});
+
+// Typing in a box applies the value live, as long as it's a valid number
+massInput.addEventListener("input", () => {
+    const body = editableBody();
+    const value = Number(massInput.value);
+    if (body && massInput.value !== "" && Number.isFinite(value) && value > 0) {
+        setMass(body, value, "box");
+    }
+});
+
+radiusInput.addEventListener("input", () => {
+    const body = editableBody();
+    const value = Number(radiusInput.value);
+    if (body && radiusInput.value !== "" && Number.isFinite(value) && value > 0) {
+        setRadius(body, value, "box");
+    }
+});
+
+// When you leave a box, tidy it up to show the value actually used
+massInput.addEventListener("change", () => {
+    if (selectedBody) massInput.value = formatNumber(selectedBody.mass);
+});
+
+radiusInput.addEventListener("change", () => {
+    if (selectedBody) radiusInput.value = formatNumber(selectedBody.radius);
+});
 
 for (const axis of ["x", "y"]) {
-    document.getElementById("v" + axis + "Input").onchange = event => {
-        if (!selectedBody) return;
+    document.getElementById("v" + axis + "Input").addEventListener("change", event => {
+        const body = editableBody();
         const value = Number(event.target.value);
-        if (!Number.isFinite(value)) return;
-        selectedBody["v" + axis] = value;
+        if (!body || event.target.value === "" || !Number.isFinite(value)) return;
+        body["v" + axis] = value;
         markSystemChanged();
-    };
+    });
+}
+
+// Sliders: editing lasts from pressing the mouse until releasing it anywhere
+let draggingSlider = false;
+
+for (const slider of [massSlider, radiusSlider]) {
+    slider.addEventListener("pointerdown", () => {
+        draggingSlider = true;
+        beginEdit("slider");
+    });
+
+    // Arrow keys also adjust a focused slider
+    slider.addEventListener("keydown", event => {
+        if (event.key.startsWith("Arrow") || ["PageUp", "PageDown", "Home", "End"].includes(event.key)) {
+            beginEdit("slider-keys");
+        }
+    });
+    slider.addEventListener("keyup", () => endEdit("slider-keys"));
+    slider.addEventListener("blur", () => endEdit("slider-keys"));
+}
+
+function stopSliderDrag() {
+    if (!draggingSlider) return;
+    draggingSlider = false;
+    endEdit("slider");
+}
+
+window.addEventListener("pointerup", stopSliderDrag);
+window.addEventListener("pointercancel", stopSliderDrag);
+
+// Number boxes: editing lasts while the cursor is in the box. Enter finishes.
+for (const input of [massInput, radiusInput, vxInput, vyInput]) {
+    input.addEventListener("focus", () => beginEdit(input.id));
+    input.addEventListener("blur", () => endEdit(input.id));
+    input.addEventListener("keydown", event => {
+        if (event.key === "Enter") input.blur();
+    });
 }
 
 document.getElementById("orbitBtn").onclick = () => {
@@ -1593,12 +1856,14 @@ window.addEventListener("keydown", event => {
         deleteSelected();
     } else if (event.key === "Escape") {
         pointer = null;
+        setBrush("select");
         selectBody(null);
     } else if (event.key === "r" || event.key === "R") {
         loadScenario(currentScenario);
     } else if (event.key === "f" || event.key === "F") {
         fitView();
     } else if (["1", "2", "3", "4"].includes(event.key)) {
+        // Pressing the key of the active tool again goes back to Select / Pan
         setBrush(["planet", "star", "moon", "blackhole"][Number(event.key) - 1]);
     }
 });
@@ -1659,4 +1924,6 @@ resizeWatcher.observe(canvas);
 resizeWatcher.observe(energyCanvas);
 
 loadScenario("solar");
+updateHint();
+updateCursor();
 requestAnimationFrame(frame);
