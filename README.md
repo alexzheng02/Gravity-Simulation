@@ -18,23 +18,34 @@ No install needed.
 
 ## What you can do
 
-- **Throw bodies:** drag on empty space to launch a planet, star, moon, or black hole. A dashed line previews its path. A quick click gives it a circular orbit.
+- **Throw bodies:** pick Planet, Star, Moon or Black Hole under the canvas, then drag on empty space to launch it. A dashed line previews its path. A quick click gives it a circular orbit.
+- **Select and pan:** the default tool. Drag to move the view, click a body to inspect it. Press Esc (or click the active body type again) to go back to it.
+- **Edit bodies:** change a selected body's mass, radius or velocity with the sliders, or type exact values in the boxes.
 - **Try scenarios:** Solar System, Binary Stars, Figure-8 three-body orbit, Gravity Assist, Black Hole Disk, Random Cluster.
 - **Compare integrators:** switch between Euler and Velocity Verlet and watch the energy graph.
 - **See the physics:** velocity and gravity arrows, a gravity field view with equipotential rings, and a "How it works" panel in the app.
+
+### Auto-pause while editing
+
+By default, the simulation keeps running while you edit a body, so you can watch changes take effect live. Tick **Auto-pause while editing** in the Physics panel to pause the simulation while you drag a slider or type in a box. It resumes when you finish, unless you had paused it yourself.
 
 ### Controls
 
 | Input | Action |
 |---|---|
-| Drag | Throw a body |
-| Click | Place a body in a circular orbit |
+| Drag (Select / Pan tool) | Pan the view |
+| Click a body | Select it |
+| Click empty space | Deselect |
+| 1-4, or the Tool buttons | Pick Planet / Star / Moon / Black Hole |
+| Drag (with a body type picked) | Throw that body |
+| Click (with a body type picked) | Place it in a circular orbit |
+| Esc | Back to Select / Pan |
+| Right-drag | Pan (any tool) |
 | Scroll | Zoom |
-| Right-drag | Pan |
 | Space | Play / pause |
 | R / F | Reset / fit view |
-| 1-4 | Planet / Star / Moon / Black Hole |
 | Delete | Remove selected body |
+| Enter (in a number box) | Apply the value |
 
 ## How it works
 

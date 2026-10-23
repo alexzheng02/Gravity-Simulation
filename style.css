@@ -110,7 +110,7 @@ canvas#universe {
     background: #02040b;
     border: 1px solid var(--border);
     border-radius: 12px;
-    cursor: crosshair;
+    cursor: grab;
     touch-action: none;
 }
 
@@ -252,6 +252,16 @@ input[type="range"] {
     background: rgba(37, 99, 235, 0.22);
 }
 
+.brush-divider {
+    width: 1px;
+    height: 24px;
+    background: var(--border);
+}
+
+.cursor-icon {
+    color: var(--text);
+}
+
 kbd {
     font-size: 10px;
     color: var(--muted);
@@ -306,18 +316,38 @@ kbd {
     font-weight: normal;
 }
 
-label.field {
+.field {
     display: block;
     margin: 10px 0;
     color: var(--muted);
 }
 
-label.field select,
-label.field input[type="range"],
-label.field input[type="number"] {
+.field > select,
+.field > input[type="range"],
+.field > input[type="number"] {
     display: block;
     width: 100%;
     margin-top: 6px;
+}
+
+/* Slider with a number box beside it for exact values */
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.slider-row input[type="range"] {
+    flex: 1;
+    min-width: 0;
+}
+
+.slider-row input[type="number"] {
+    width: 92px;
+    flex-shrink: 0;
+    padding: 5px 7px;
+    font-variant-numeric: tabular-nums;
 }
 
 .value {
