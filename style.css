@@ -356,6 +356,44 @@ kbd {
     font-variant-numeric: tabular-nums;
 }
 
+.range-ends {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 2px;
+}
+
+.solver-stats {
+    font-size: 12px;
+    color: var(--muted);
+    background: var(--panel-2);
+    border-radius: 7px;
+    padding: 7px 9px;
+    margin: 4px 0 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.solver-stats b {
+    color: var(--text);
+}
+
+.solver-stats .speedup {
+    color: #4ade80;
+}
+
+.body-item.more {
+    cursor: default;
+    color: var(--muted);
+    font-size: 12px;
+    background: transparent;
+    border: 1px dashed var(--border);
+}
+
+.body-item.more:hover {
+    background: transparent;
+}
+
 .toggles {
     display: grid;
     gap: 7px;
