@@ -20,8 +20,8 @@
 
 // Physics constants. These are "simulation units", not metres and kilograms.
 const G = 1;                    // gravitational constant
-const DT = 0.1;                 // length of one time step
-const SOFTENING = 5;            // epsilon: stops gravity going to infinity at r = 0
+const DEFAULT_TIME_STEP = 0.1;  // length of one time step (dt)
+const DEFAULT_SOFTENING = 5;    // epsilon: stops gravity going to infinity at r = 0
 const STEPS_PER_SECOND = 300;   // physics steps per real second at 1x speed
 const MAX_STEPS_PER_FRAME = 80; // safety limit so a slow computer doesn't freeze
 const PHYSICS_BUDGET_MS = 11;   // max time per frame spent on physics, so drawing stays smooth
@@ -42,11 +42,15 @@ const BODY_TYPES = {
     star:      { label: "Star",       mass: 10000, radius: 22, color: "#fbbf24" },
     moon:      { label: "Moon",       mass: 1,     radius: 4,  color: "#cbd5e1" },
     blackhole: { label: "Black Hole", mass: 40000, radius: 10, color: "#111111" },
-    rock:      { label: "Rock",       mass: 0.1,   radius: 1.2, color: "#a8a29e" }
+    rock:      { label: "Rock",       mass: 0.1,   radius: 1.2, color: "#a8a29e" },
+    // Stars inside a galaxy. Each one stands for a whole crowd of real stars.
+    // Real stars are so far apart that they practically never hit anything,
+    // so galaxy stars pass through everything ("collisionless").
+    galaxyStar: { label: "Galaxy star", mass: 2, radius: 1.2, color: "#e0f2fe", collisionless: true }
 };
 
 // Small, numerous body types that get simplified drawing in big systems
-const SMALL_TYPES = new Set(["moon", "rock"]);
+const SMALL_TYPES = new Set(["moon", "rock", "galaxyStar"]);
 
 const PLANET_COLORS = [
     "#38bdf8", "#a78bfa", "#34d399", "#f472b6",
@@ -66,6 +70,8 @@ let nextId = 1;
 let typeCounters = {};
 let currentScenario = "solar";
 
+let timeStep = DEFAULT_TIME_STEP; // scenarios with slow motion (galaxies) use bigger steps
+let softening = DEFAULT_SOFTENING; // galaxies use more, see the galaxy scenario
 let solverMode = "auto"; // "auto", "direct" or "bh" (Barnes-Hut)
 let theta = 0.6;         // Barnes-Hut opening angle: smaller = more accurate, slower
 
@@ -123,6 +129,7 @@ const fieldCanvas = document.createElement("canvas");
 const fieldCtx = fieldCanvas.getContext("2d");
 let fieldImage = null;
 let fieldLevels = new Float32Array(0);
+let lastFieldCell = 4;
 
 
 /* ==========================================================================
@@ -202,7 +209,7 @@ function computeForcesDirect(list, isMain) {
         body.phi = 0;
     }
 
-    const eps2 = SOFTENING * SOFTENING;
+    const eps2 = softening * softening;
     const n = list.length;
 
     for (let i = 0; i < n; i++) {
@@ -246,7 +253,7 @@ function computeForcesDirect(list, isMain) {
  * Children are always created after their parent, so walking the node list
  * backwards visits children before parents.
  */
-const LEAF_CAPACITY = 16;
+const LEAF_CAPACITY = 8;
 
 const tree = {
     capacity: 0,
@@ -515,7 +522,7 @@ function walkTree(x, y, self, theta2, eps2, record = null) {
  *
  * Bodies in the same leaf are close together, so they need almost the same
  * list of "far squares" and "nearby bodies". Instead of walking the tree for
- * every body, we walk it once per leaf (up to 16 bodies) and share the lists.
+ * every body, we walk it once per leaf (up to 8 bodies) and share the lists.
  * The test for "far enough" uses the leaf body CLOSEST to each square, so
  * it is at least as accurate as walking separately for each body.
  */
@@ -597,7 +604,7 @@ function computeForcesTree(list, isMain) {
     buildTree(list);
 
     const theta2 = theta * theta;
-    const eps2 = SOFTENING * SOFTENING;
+    const eps2 = softening * softening;
     const { leaf, leafCount, first, next, mass, comX, comY, bx, by, bm } = tree;
     let total = 0;
     let groups = 0;
@@ -715,14 +722,14 @@ function physicsStep() {
     if (!accelerationsFresh) computeForces(bodies, true);
 
     if (integrator === "verlet") {
-        stepVerlet(bodies, DT, true);
+        stepVerlet(bodies, timeStep, true);
         accelerationsFresh = true;
     } else {
-        stepEuler(bodies, DT);
+        stepEuler(bodies, timeStep);
         accelerationsFresh = false;
     }
 
-    simTime += DT;
+    simTime += timeStep;
 
     if (options.merge) handleCollisions();
 }
@@ -738,8 +745,9 @@ function physicsStep() {
  * sort the bodies left to right, then each body only checks the bodies to
  * its right that are close enough horizontally to possibly touch it.
  */
+// Collisionless bodies (galaxy stars) never collide with anything
 function canCollide(a, b) {
-    return true;
+    return !BODY_TYPES[a.type].collisionless && !BODY_TYPES[b.type].collisionless;
 }
 
 let sweepOrder = new Int32Array(0);
@@ -784,10 +792,27 @@ function findTouchingPairs() {
     return pairs;
 }
 
+/*
+ * How much the system's energy changes when a and b merge:
+ *  - kinetic energy lost to heat: 1/2 * mu * (relative speed)^2,
+ *    where mu = ma * mb / (ma + mb)
+ *  - their potential energy with each other disappears: + G ma mb / r
+ */
+function mergeEnergyChange(a, b) {
+    const mu = a.mass * b.mass / (a.mass + b.mass);
+    const dvx = a.vx - b.vx;
+    const dvy = a.vy - b.vy;
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const r = Math.sqrt(dx * dx + dy * dy + softening * softening);
+    return -0.5 * mu * (dvx * dvx + dvy * dvy) + G * a.mass * b.mass / r;
+}
+
 function mergeBodies(a, b) {
     const big = a.mass >= b.mass ? a : b;
     const small = big === a ? b : a;
     const totalMass = a.mass + b.mass;
+    const energyChange = mergeEnergyChange(a, b);
 
     // Centre of mass position and momentum-conserving velocity
     big.x = (a.x * a.mass + b.x * b.mass) / totalMass;
@@ -799,15 +824,20 @@ function mergeBodies(a, b) {
     // Volumes add, so the new radius is the cube root of the summed cubes
     big.radius = Math.min(60, Math.cbrt(a.radius ** 3 + b.radius ** 3));
 
-    effects.push({ x: big.x, y: big.y, radius: big.radius, age: 0, color: small.color });
+    // Big systems: no flash for tiny bodies merging (there are hundreds)
+    const notable = bodies.length <= 300 || !SMALL_TYPES.has(small.type);
+    if (notable) effects.push({ x: big.x, y: big.y, radius: big.radius, age: 0, color: small.color });
 
     small.dead = true;
     if (selectedBody === small) selectedBody = big;
-    return small;
+    return { energyChange, notable };
 }
 
 function handleCollisions() {
+    const selectedBefore = selectedBody;
     let merged = false;
+    let notable = false;
+    let energyChange = 0;
 
     // A merge can create a new overlap, so check again (a few rounds at most)
     for (let round = 0; round < 4; round++) {
@@ -816,7 +846,9 @@ function handleCollisions() {
 
         for (const [a, b] of pairs) {
             if (a.dead || b.dead) continue;
-            mergeBodies(a, b);
+            const result = mergeBodies(a, b);
+            energyChange += result.energyChange;
+            notable = notable || result.notable;
             merged = true;
         }
 
@@ -824,8 +856,19 @@ function handleCollisions() {
     }
 
     if (merged) {
-        markSystemChanged();
+        // The energy really changes in a merge (heat), so the drift readout
+        // allows for exactly that change instead of counting it as an error
+        if (energyBaseline) energyBaseline.total += energyChange;
+        accelerationsFresh = false;
+        if (notable) pendingEnergyEvent = true;
         bodyListDirty = true;
+
+        // If the selected body was swallowed, show the body it merged into
+        // straight away, so the panel never shows the wrong body
+        if (selectedBody !== selectedBefore) {
+            refreshBodyList();
+            updateProperties();
+        }
     }
 }
 
@@ -843,7 +886,7 @@ function handleCollisions() {
 function measureEnergy(list) {
     let kinetic = 0;
     let potential = 0;
-    const eps2 = SOFTENING * SOFTENING;
+    const eps2 = softening * softening;
 
     for (const b of list) {
         kinetic += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
@@ -937,7 +980,7 @@ function zeroMomentum() {
 function dominantAttractor(x, y, exclude) {
     let best = null;
     let bestPull = 0;
-    const eps2 = SOFTENING * SOFTENING;
+    const eps2 = softening * softening;
 
     for (const b of bodies) {
         if (b === exclude) continue;
@@ -967,7 +1010,7 @@ function circularVelocity(x, y, mass, attractor) {
 
     const totalMass = attractor.mass + mass;
     const speed = Math.sqrt(
-        G * totalMass * r * r / Math.pow(r * r + SOFTENING * SOFTENING, 1.5)
+        G * totalMass * r * r / Math.pow(r * r + softening * softening, 1.5)
     );
 
     return {
@@ -1006,9 +1049,9 @@ function predictPath(start, velocity) {
 
     for (let s = 0; s < steps && !hit; s++) {
         if (integrator === "verlet") {
-            stepVerlet(sim, DT);
+            stepVerlet(sim, timeStep);
         } else {
-            stepEuler(sim, DT);
+            stepEuler(sim, timeStep);
             computeForces(sim);
         }
 
@@ -1043,7 +1086,7 @@ function predictPathFrozen(start, velocity) {
 
     const preset = BODY_TYPES[brush];
     const theta2 = 0.8 * 0.8;
-    const eps2 = SOFTENING * SOFTENING;
+    const eps2 = softening * softening;
     const obstacles = bodies.filter(b => b.radius >= 2);
 
     let x = start.x, y = start.y, vx = velocity.vx, vy = velocity.vy;
@@ -1054,15 +1097,15 @@ function predictPathFrozen(start, velocity) {
     let hit = null;
 
     for (let s = 0; s < 600 && !hit; s++) {
-        vx += ax * DT / 2;
-        vy += ay * DT / 2;
-        x += vx * DT;
-        y += vy * DT;
+        vx += ax * timeStep / 2;
+        vy += ay * timeStep / 2;
+        x += vx * timeStep;
+        y += vy * timeStep;
         walkTree(x, y, -1, theta2, eps2);
         ax = walkAx;
         ay = walkAy;
-        vx += ax * DT / 2;
-        vy += ay * DT / 2;
+        vx += ax * timeStep / 2;
+        vy += ay * timeStep / 2;
 
         if (s % 3 === 0) points.push({ x, y });
 
@@ -1117,6 +1160,56 @@ function seededRandom(seed) {
     };
 }
 
+/*
+ * A disk galaxy: a central black hole and a spinning disk of stars.
+ * Each star gets the speed for a circular orbit around everything closer to
+ * the centre than it is (the black hole plus the inner stars).
+ * spin = 1 for counter-clockwise (in maths terms), -1 for clockwise.
+ */
+function makeGalaxy({ name, x, y, vx, vy, spin, colors, blackHoleMass, starsPerGalaxy, random }) {
+    addBody({ type: "blackhole", name: name + " core", x, y, vx, vy, mass: blackHoleMass, radius: 6 });
+
+    const starMass = BODY_TYPES.galaxyStar.mass;
+    const inner = 35;
+    const outer = 200;
+
+    // Distances from the centre: more stars near the middle, thinning out
+    // (an "exponential disk", like real spiral galaxies). Kept fairly flat,
+    // because the outer stars are the ones that form tidal tails.
+    const scale = (outer - inner) / 1.2;
+    const span = 1 - Math.exp(-(outer - inner) / scale);
+    const distances = [];
+    for (let i = 0; i < starsPerGalaxy; i++) {
+        distances.push(inner - scale * Math.log(1 - random() * span));
+    }
+    distances.sort((a, b) => a - b);
+
+    distances.forEach((r, i) => {
+        const angle = random() * Math.PI * 2;
+        const dx = r * Math.cos(angle);
+        const dy = r * Math.sin(angle);
+
+        // Mass inside this star's orbit
+        const enclosed = blackHoleMass + i * starMass;
+        const circular = Math.sqrt(
+            G * enclosed * r * r / Math.pow(r * r + softening * softening, 1.5)
+        );
+
+        // A little random motion (2%), like real stars
+        const wobble = () => (random() - 0.5) * 0.04 * circular;
+
+        addBody({
+            type: "galaxyStar",
+            name: name + " star " + (i + 1),
+            x: x + dx,
+            y: y + dy,
+            vx: vx - spin * circular * dy / r + wobble(),
+            vy: vy + spin * circular * dx / r + wobble(),
+            color: colors[i % colors.length]
+        });
+    });
+}
+
 const SCENARIOS = {
 
     solar: {
@@ -1151,7 +1244,7 @@ const SCENARIOS = {
             const each = 6000;
             const r = separation;
             const relativeSpeed = Math.sqrt(
-                G * 2 * each * r * r / Math.pow(r * r + SOFTENING * SOFTENING, 1.5)
+                G * 2 * each * r * r / Math.pow(r * r + softening * softening, 1.5)
             );
 
             addBody({ type: "star", name: "Helios A", x: -separation / 2, y: 0, vy: relativeSpeed / 2, mass: each, radius: 18, color: "#fbbf24" });
@@ -1282,6 +1375,67 @@ const SCENARIOS = {
         }
     },
 
+    galaxies: {
+        fit: 700,
+        timeStep: 0.3,  // galaxies change slowly, so bigger time steps are fine
+        // More softening: a galaxy's centre isn't a point, it's a black hole
+        // inside a dense ball of stars. Without this, stars skimming the
+        // black holes get kicks too sharp for the time step, and energy drifts
+        // by ~5% instead of ~0.4%.
+        softening: 15,
+        note: "Two spiral galaxies, each a black hole with 1,500 stars, swing past each other. The blue one spins the same way it's moving (prograde) and gets pulled into long tidal tails; the gold one spins the other way (retrograde) and stays mostly intact, as Toomre & Toomre showed in 1972. They're bound together, so they fall back through each other. Scroll out to follow the tails.",
+        build() {
+            const random = seededRandom(11);
+            const blackHoleMass = 12000;
+            const starsPerGalaxy = 1500;
+            const starMass = BODY_TYPES.galaxyStar.mass;
+            const totalMass = 2 * (blackHoleMass + starsPerGalaxy * starMass);
+
+            /*
+             * The galaxies' path around each other: an ellipse (they're
+             * gravitationally bound, so they'll come back and eventually
+             * merge). They start at their farthest point, 600 apart, moving
+             * sideways, and swing past each other at 200 apart.
+             *   semi-major axis a = (600 + 200) / 2 = 400
+             *   eccentricity    e = (600 - 200) / (600 + 200) = 0.5
+             *   speed at the farthest point = sqrt(G M / a * (1 - e) / (1 + e))
+             */
+            const farthest = 600;
+            const closest = 200;
+            const a = (farthest + closest) / 2;
+            const e = (farthest - closest) / (farthest + closest);
+            const speed = Math.sqrt(G * totalMass / a * (1 - e) / (1 + e));
+
+            // Tilt the whole picture a little so it fills the screen nicely
+            const tilt = -0.45;
+            const rotate = (x, y) => ({
+                x: x * Math.cos(tilt) - y * Math.sin(tilt),
+                y: x * Math.sin(tilt) + y * Math.cos(tilt)
+            });
+
+            // Relative position and velocity of galaxy B as seen from A
+            const relPos = rotate(farthest, 0);
+            const relVel = rotate(0, speed);
+
+            makeGalaxy({
+                name: "Blue Galaxy",
+                x: -relPos.x / 2, y: -relPos.y / 2,
+                vx: -relVel.x / 2, vy: -relVel.y / 2,
+                spin: 1,   // same direction as the orbit: prograde
+                colors: ["#93c5fd", "#e0f2fe", "#a5b4fc"],
+                blackHoleMass, starsPerGalaxy, random
+            });
+            makeGalaxy({
+                name: "Gold Galaxy",
+                x: relPos.x / 2, y: relPos.y / 2,
+                vx: relVel.x / 2, vy: relVel.y / 2,
+                spin: -1,  // opposite direction: retrograde
+                colors: ["#fcd34d", "#fdba74", "#fef3c7"],
+                blackHoleMass, starsPerGalaxy, random
+            });
+        }
+    },
+
     empty: {
         fit: 300,
         note: "Empty space. Pick a body type below the canvas and start throwing things.",
@@ -1310,6 +1464,8 @@ function loadScenario(name) {
     editState.pausedByEdit = false;
     speedRatio = 1;
     bodyListDirty = false;
+    timeStep = scenario.timeStep ?? DEFAULT_TIME_STEP;
+    softening = scenario.softening ?? DEFAULT_SOFTENING;
 
     scenario.build();
     zeroMomentum();
@@ -1492,12 +1648,22 @@ function drawField() {
     // Big systems use the Barnes-Hut tree here too (about 50 pulls per
     // square instead of n)
     const useTreeForField = n > FIELD_TREE_LIMIT;
+
+    // Big systems: the glow changes slowly, so only recalculate it every
+    // other frame and reuse the last picture in between
+    if (useTreeForField && frameCount % 2 === 1 && fieldImage) {
+        useScreenTransform();
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(fieldCanvas, 0, 0, fieldCanvas.width * lastFieldCell, fieldCanvas.height * lastFieldCell);
+        return;
+    }
     if (useTreeForField) buildTree(bodies);
 
     // Square size is chosen so the total work (squares x bodies) stays about
     // the same: small squares with few bodies, bigger ones with many.
     const work = useTreeForField ? 50 : n;
     const cell = clamp(Math.ceil(Math.sqrt(viewWidth * viewHeight * work / 300000)), 3, 8);
+    lastFieldCell = cell;
     const cols = Math.ceil(viewWidth / cell);
     const rows = Math.ceil(viewHeight / cell);
 
@@ -1520,7 +1686,8 @@ function drawField() {
 
             let potential = 0;
             if (useTreeForField) {
-                walkTree(wx, wy, -1, 1.0, eps2);
+                // A rough tree setting is fine for a background glow
+                walkTree(wx, wy, -1, 1.3, eps2);
                 potential = -walkPhi / G;
             } else {
                 for (let k = 0; k < n; k++) {
@@ -1556,7 +1723,7 @@ function drawField() {
             const fraction = ringPosition - Math.floor(ringPosition);
             const distance = Math.min(fraction, 1 - fraction) / ringsPerSquare;
 
-            let line = clamp(1 - distance / 0.8, 0, 1);
+            let line = clamp(1 - distance / 1.2, 0, 1);
             // Fade out rings that would be packed too tightly to see (e.g. zoomed out near a star)
             line *= smoothstep(2.5, 6, 1 / ringsPerSquare);
             // Fade out the faint outermost rings
@@ -1575,7 +1742,7 @@ function drawField() {
     fieldCtx.putImageData(fieldImage, 0, 0);
     useScreenTransform();
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
+    ctx.imageSmoothingQuality = "low"; // "low" is already smooth when enlarging, and much faster
     ctx.drawImage(fieldCanvas, 0, 0, cols * cell, rows * cell);
 }
 
@@ -1589,7 +1756,13 @@ function trailLimit() {
 
 function recordTrails() {
     const limit = trailLimit();
+    // Big systems: no trails for tiny bodies, only for the bigger ones
+    const skipSmall = bodies.length > 300;
     for (const b of bodies) {
+        if (skipSmall && SMALL_TYPES.has(b.type)) {
+            if (b.trail.length) b.trail = [];
+            continue;
+        }
         b.trail.push({ x: b.x, y: b.y });
         while (b.trail.length > limit) b.trail.shift();
     }
@@ -1600,7 +1773,13 @@ function drawTrails() {
     ctx.lineWidth = 1.5 / camera.zoom;
     ctx.lineJoin = "round";
 
-    const chunks = bodies.length > 300 ? 2 : 6;
+    // Big systems: draw all trails of the same colour in one go (much faster)
+    if (bodies.length > 300) {
+        drawTrailsBatched();
+        return;
+    }
+
+    const chunks = 6;
 
     for (const b of bodies) {
         const trail = b.trail;
@@ -1623,7 +1802,56 @@ function drawTrails() {
     }
 }
 
+// Group bodies by colour, so each colour can be drawn with one canvas call
+function groupByColor(list) {
+    const groups = new Map();
+    for (const b of list) {
+        const group = groups.get(b.color);
+        if (group) group.push(b);
+        else groups.set(b.color, [b]);
+    }
+    return groups;
+}
+
+function drawTrailsBatched() {
+    for (const [color, group] of groupByColor(bodies)) {
+        ctx.beginPath();
+        for (const b of group) {
+            const trail = b.trail;
+            if (trail.length < 2) continue;
+            ctx.moveTo(trail[0].x, trail[0].y);
+            for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
+        }
+        ctx.strokeStyle = rgba(color === "#111111" ? "#f97316" : color, 0.4);
+        ctx.stroke();
+    }
+}
+
 // ---------- Bodies ----------
+
+// Tiny rocks and moons are drawn as plain dots, one canvas call per colour
+function isTinyDot(b) {
+    return b.type === "galaxyStar" || (SMALL_TYPES.has(b.type) && b.radius * camera.zoom < 3);
+}
+
+// `glow`: colours add up where dots overlap ("lighter" blending), so the
+// crowded centre of a galaxy glows brighter, like real photos
+function drawDots(list, glow = false) {
+    if (glow) ctx.globalCompositeOperation = "lighter";
+
+    for (const [color, group] of groupByColor(list)) {
+        ctx.beginPath();
+        for (const b of group) {
+            // Galaxy stars stay visible when zoomed out
+            const size = Math.max(b.radius, (glow ? 1.3 : 0.9) / camera.zoom);
+            ctx.rect(b.x - size, b.y - size, size * 2, size * 2);
+        }
+        ctx.fillStyle = glow ? rgba(color, 0.85) : color;
+        ctx.fill();
+    }
+
+    ctx.globalCompositeOperation = "source-over";
+}
 
 // Direction toward the brightest nearby star, so planets are lit on that side.
 // `lightSources` is the list of stars, collected once per frame in render().
@@ -1653,12 +1881,9 @@ function lightDirection(body) {
 function drawBody(b) {
     const { x, y, radius: r } = b;
 
-    // Tiny rocks and moons: a plain dot is much faster than a shaded sphere,
-    // and looks the same at a few pixels wide
-    if (SMALL_TYPES.has(b.type) && r * camera.zoom < 3) {
-        const size = Math.max(r, 0.9 / camera.zoom);
-        ctx.fillStyle = b.color;
-        ctx.fillRect(x - size, y - size, size * 2, size * 2);
+    // Tiny rocks and moons: a plain dot looks the same at a few pixels wide
+    if (isTinyDot(b)) {
+        drawDots([b]);
         if (b === selectedBody) drawSelectionRing(b);
         return;
     }
@@ -2076,7 +2301,19 @@ function render() {
 
     lightSources = bodies.filter(b => b.type === "star");
     useWorldTransform();
-    for (const b of bodies) drawBody(b);
+    const dots = [];
+    const glowDots = [];
+    for (const b of bodies) {
+        if (b === selectedBody || !isTinyDot(b)) continue;
+        if (b.type === "galaxyStar") glowDots.push(b);
+        else dots.push(b);
+    }
+    drawDots(glowDots, true);
+    drawDots(dots);
+    // Bigger bodies (and the selected one) on top
+    for (const b of bodies) {
+        if (b === selectedBody || !isTinyDot(b)) drawBody(b);
+    }
 
     if (options.vectors) drawVectors();
 
@@ -2124,7 +2361,10 @@ function refreshBodyList() {
     // Big systems: list the heaviest bodies (plus the selected one)
     let shown = bodies;
     if (bodies.length > BODY_LIST_LIMIT) {
-        shown = [...bodies].sort((a, b) => b.mass - a.mass).slice(0, BODY_LIST_LIMIT);
+        shown = bodies
+            .filter(b => b.type !== "galaxyStar")
+            .sort((a, b) => b.mass - a.mass)
+            .slice(0, BODY_LIST_LIMIT);
         if (selectedBody && !shown.includes(selectedBody)) shown.push(selectedBody);
     }
 
