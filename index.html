@@ -26,6 +26,7 @@
             <option value="slingshot">Gravity Assist</option>
             <option value="blackhole">Black Hole Disk</option>
             <option value="cluster">Random Cluster</option>
+            <option value="planetFormation">Planet Formation (1,500 rocks)</option>
             <option value="empty">Empty Space</option>
         </select>
     </div>
@@ -104,6 +105,25 @@
                 </select>
             </label>
 
+            <label class="field">
+                Gravity solver
+                <select id="solverSelect">
+                    <option value="auto">Auto (Barnes-Hut above 200 bodies)</option>
+                    <option value="direct">Direct (exact, every pair)</option>
+                    <option value="bh">Barnes-Hut (fast, approximate)</option>
+                </select>
+            </label>
+
+            <div class="field">
+                <label for="thetaSlider">
+                    Barnes-Hut accuracy (&theta;) <span class="value" id="thetaValue">0.60</span>
+                </label>
+                <input type="range" id="thetaSlider" min="0.1" max="1.5" step="0.05" value="0.6">
+                <span class="range-ends"><span>accurate, slower</span><span>rough, faster</span></span>
+            </div>
+
+            <p class="solver-stats" id="solverStats"></p>
+
             <div class="toggles">
                 <label title="Pauses the simulation while you drag a slider or type in a box, then resumes">
                     <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
@@ -111,6 +131,7 @@
                 <label><input type="checkbox" id="trailToggle" checked> Trails</label>
                 <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
                 <label><input type="checkbox" id="fieldToggle"> Gravity field</label>
+                <label><input type="checkbox" id="treeToggle"> Show Barnes-Hut tree</label>
                 <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
                 <label><input type="checkbox" id="labelToggle" checked> Labels</label>
             </div>
@@ -119,6 +140,13 @@
                 <span class="dot" style="background:#4ade80"></span>velocity
                 <span class="dot" style="background:#fb923c"></span>acceleration (gravity)
                 <br>Arrow lengths are scaled down to fit on screen.
+            </p>
+
+            <p class="legend-note hidden" id="treeLegend">
+                Each square holds up to 16 bodies before splitting into four.
+                Select a body to see what its group uses:
+                <br><span class="dot" style="background:#fb923c"></span>far squares, each pulling as one mass at its dot
+                <br><span class="dot" style="background:#22d3ee"></span>nearby bodies, calculated one by one
             </p>
         </section>
 
@@ -235,7 +263,15 @@
             <p>
                 When two bodies touch they merge. Mass and momentum are
                 conserved exactly, but some kinetic energy turns into heat,
-                so the energy graph marks each merge with a dashed line.
+                so the total energy line jumps (marked with a dashed line).
+                The amount lost is
+                <code>&frac12;&middot;&mu;&middot;v&sup2;</code>, where
+                <i>v</i> is their relative speed and
+                <code>&mu; = m&#8321;m&#8322; / (m&#8321; + m&#8322;)</code>.
+                The drift readout allows for exactly that loss, so it only
+                counts real numerical error. To find bodies quickly, collisions
+                use "sweep and prune": bodies are sorted left to right, and each
+                one only checks neighbours that overlap it horizontally.
             </p>
 
             <h3>6. The gravity field</h3>
@@ -245,6 +281,28 @@
                 at rest falls straight across them, downhill. Gravity has no
                 edge; it reaches forever and just gets weaker, so the glow fades
                 out smoothly instead of stopping.
+            </p>
+
+            <h3>7. Barnes-Hut: thousands of bodies</h3>
+            <p>
+                Checking every pair gets slow fast: 1,500 bodies means over a
+                million pairs, every step. The Barnes-Hut method (1986) splits
+                space into squares, then splits crowded squares into four
+                smaller ones, building a <em>quadtree</em>.
+            </p>
+            <p>
+                A distant cluster pulls almost exactly like one body with the
+                cluster's total mass at its centre of mass. So if a square is
+                small compared to its distance (<code>size / distance &lt; &theta;</code>),
+                its whole contents count as one pull. Nearby bodies are still
+                calculated one by one. The work grows like
+                <code>n log n</code> instead of <code>n&sup2;</code>.
+            </p>
+            <p>
+                The catch: it's an approximation. Turn on "Show Barnes-Hut
+                tree", select a body, and move the &theta; slider to see the
+                trade-off between speed and accuracy. The energy graph shows
+                the small extra error compared to the exact method.
             </p>
         </details>
 

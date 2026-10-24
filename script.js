@@ -24,6 +24,13 @@ const DT = 0.1;                 // length of one time step
 const SOFTENING = 5;            // epsilon: stops gravity going to infinity at r = 0
 const STEPS_PER_SECOND = 300;   // physics steps per real second at 1x speed
 const MAX_STEPS_PER_FRAME = 80; // safety limit so a slow computer doesn't freeze
+const PHYSICS_BUDGET_MS = 11;   // max time per frame spent on physics, so drawing stays smooth
+
+// Barnes-Hut settings
+const AUTO_TREE_THRESHOLD = 200;  // "Auto" solver uses Barnes-Hut above this many bodies
+const TREE_MAX_DEPTH = 32;        // stop splitting squares after this many levels
+const PREDICT_DIRECT_LIMIT = 150; // above this, the launch preview uses a frozen tree
+const FIELD_TREE_LIMIT = 80;      // above this, the gravity field view uses the tree
 
 const TRAIL_LENGTH = 450;       // how many points each trail remembers
 const LAUNCH_SCALE = 0.05;      // how much velocity one unit of mouse drag gives
@@ -34,8 +41,12 @@ const BODY_TYPES = {
     planet:    { label: "Planet",     mass: 10,    radius: 8,  color: null },
     star:      { label: "Star",       mass: 10000, radius: 22, color: "#fbbf24" },
     moon:      { label: "Moon",       mass: 1,     radius: 4,  color: "#cbd5e1" },
-    blackhole: { label: "Black Hole", mass: 40000, radius: 10, color: "#111111" }
+    blackhole: { label: "Black Hole", mass: 40000, radius: 10, color: "#111111" },
+    rock:      { label: "Rock",       mass: 0.1,   radius: 1.2, color: "#a8a29e" }
 };
+
+// Small, numerous body types that get simplified drawing in big systems
+const SMALL_TYPES = new Set(["moon", "rock"]);
 
 const PLANET_COLORS = [
     "#38bdf8", "#a78bfa", "#34d399", "#f472b6",
@@ -55,11 +66,20 @@ let nextId = 1;
 let typeCounters = {};
 let currentScenario = "solar";
 
+let solverMode = "auto"; // "auto", "direct" or "bh" (Barnes-Hut)
+let theta = 0.6;         // Barnes-Hut opening angle: smaller = more accurate, slower
+
+// How the last gravity calculation went, for the stats readout
+const solverStats = { method: "direct", n: 0, interactions: 0, groups: 0 };
+let speedRatio = 1;      // how close to the requested speed the computer keeps up
+let bodyListDirty = false;
+
 const options = {
     autoPause: false,
     trails: true,
     vectors: false,
     field: false,
+    tree: false,
     merge: true,
     labels: true
 };
@@ -118,7 +138,8 @@ function createBody({ type, name, x, y, vx = 0, vy = 0, mass, radius, color }) {
         type,
         name: name ?? preset.label + " " + typeCounters[type],
         x, y, vx, vy,
-        ax: 0, ay: 0,
+        ax: 0, ay: 0, phi: 0,
+        dead: false,
         mass: mass ?? preset.mass,
         radius: radius ?? preset.radius,
         color: color ?? preset.color ??
@@ -133,29 +154,61 @@ function nextPlanetColor() {
 }
 
 /*
- * Newton's law of gravity for every pair of bodies.
+ * GRAVITY
  *
- *   a = G * M / r^2, pointing toward the other body
+ * Two ways to calculate it, picked by the "Gravity solver" setting:
  *
- * We loop over each PAIR once (j starts at i + 1) and apply equal and
- * opposite pulls to both bodies (Newton's third law). That's half the
- * work of the naive "every body looks at every other body" loop.
+ * 1. Direct: Newton's law for every pair of bodies.
+ *      a = G * M / r^2, pointing toward the other body
+ *    We loop over each PAIR once and apply equal and opposite pulls to both
+ *    bodies (Newton's third law). Exact, but the work grows with n^2:
+ *    1,000 bodies = ~500,000 pairs every step.
+ *
+ * 2. Barnes-Hut: put the bodies in a "quadtree" (squares split into four
+ *    smaller squares, again and again, until each square holds one body).
+ *    A far-away square full of bodies pulls almost exactly like ONE body
+ *    with their total mass sitting at their centre of mass. So for each
+ *    body we walk the tree, and if a square is small compared to its
+ *    distance (size / distance < theta), we use that single combined pull
+ *    instead of visiting every body inside it. The work grows like
+ *    n * log(n) instead of n^2.
+ *
+ * Both also compute each body's potential (phi), used for the energy graph.
  *
  * Softening: instead of r^2 we use r^2 + epsilon^2, so two bodies passing
  * extremely close don't get an infinite kick.
  */
-function computeAccelerations(list) {
+
+function usesTree(n) {
+    if (solverMode === "bh") return n > 1;
+    if (solverMode === "direct") return false;
+    return n > AUTO_TREE_THRESHOLD;
+}
+
+// `isMain` is true for the real simulation (not the launch preview),
+// so only the real simulation updates the stats readout.
+function computeForces(list, isMain = false) {
+    if (usesTree(list.length)) {
+        computeForcesTree(list, isMain);
+    } else {
+        computeForcesDirect(list, isMain);
+    }
+}
+
+function computeForcesDirect(list, isMain) {
     for (const body of list) {
         body.ax = 0;
         body.ay = 0;
+        body.phi = 0;
     }
 
     const eps2 = SOFTENING * SOFTENING;
+    const n = list.length;
 
-    for (let i = 0; i < list.length; i++) {
+    for (let i = 0; i < n; i++) {
         const a = list[i];
 
-        for (let j = i + 1; j < list.length; j++) {
+        for (let j = i + 1; j < n; j++) {
             const b = list[j];
 
             const dx = b.x - a.x;
@@ -170,8 +223,446 @@ function computeAccelerations(list) {
             a.ay += dy * factor * b.mass;
             b.ax -= dx * factor * a.mass;
             b.ay -= dy * factor * a.mass;
+
+            // Potential: -G * M / r
+            const inverseDist = 1 / Math.sqrt(distSquared);
+            a.phi -= G * b.mass * inverseDist;
+            b.phi -= G * a.mass * inverseDist;
         }
     }
+
+    if (isMain) {
+        solverStats.method = "direct";
+        solverStats.n = n;
+        solverStats.interactions = n * (n - 1) / 2;
+    }
+}
+
+/* ---------- The quadtree ----------
+ *
+ * Stored in flat typed arrays (one slot per square, or "node") because that
+ * is much faster in JavaScript than thousands of small objects.
+ * Each leaf holds up to LEAF_CAPACITY bodies before it splits into four.
+ * Children are always created after their parent, so walking the node list
+ * backwards visits children before parents.
+ */
+const LEAF_CAPACITY = 16;
+
+const tree = {
+    capacity: 0,
+    count: 0,       // nodes in use
+    list: null,     // the bodies the tree was built from
+    cx: null,       // centre of the square
+    cy: null,
+    half: null,     // half the square's width
+    mass: null,     // total mass inside
+    comX: null,     // centre of mass of everything inside
+    comY: null,
+    child: null,    // 4 children per node, -1 = none
+    leaf: null,     // 1 if the node has no children
+    first: null,    // leaf: first body inside (-1 = empty)
+    leafCount: null,// leaf: how many bodies inside
+    // Per body: position and mass copied into fast arrays, and the next
+    // body in the same leaf (a linked list)
+    bx: new Float64Array(0),
+    by: new Float64Array(0),
+    bm: new Float64Array(0),
+    next: new Int32Array(0)
+};
+
+const NODE_ARRAYS = ["cx", "cy", "half", "mass", "comX", "comY", "child", "leaf", "first", "leafCount"];
+
+function allocateTree(capacity) {
+    tree.capacity = capacity;
+    tree.cx = new Float64Array(capacity);
+    tree.cy = new Float64Array(capacity);
+    tree.half = new Float64Array(capacity);
+    tree.mass = new Float64Array(capacity);
+    tree.comX = new Float64Array(capacity);
+    tree.comY = new Float64Array(capacity);
+    tree.child = new Int32Array(capacity * 4);
+    tree.leaf = new Uint8Array(capacity);
+    tree.first = new Int32Array(capacity);
+    tree.leafCount = new Int32Array(capacity);
+}
+
+// Double the space if bodies are bunched up and need more nodes than expected
+function growTree() {
+    const old = {};
+    for (const key of NODE_ARRAYS) old[key] = tree[key];
+    allocateTree(tree.capacity * 2);
+    for (const key of NODE_ARRAYS) tree[key].set(old[key]);
+}
+
+function newNode(cx, cy, half) {
+    if (tree.count >= tree.capacity) growTree();
+    const k = tree.count++;
+    tree.cx[k] = cx;
+    tree.cy[k] = cy;
+    tree.half[k] = half;
+    tree.mass[k] = 0;
+    tree.child[4 * k] = -1;
+    tree.child[4 * k + 1] = -1;
+    tree.child[4 * k + 2] = -1;
+    tree.child[4 * k + 3] = -1;
+    tree.leaf[k] = 1;
+    tree.first[k] = -1;
+    tree.leafCount[k] = 0;
+    return k;
+}
+
+// Which quarter of node k is the point in? 0 = top-left ... 3 = bottom-right
+function quadrant(k, x, y) {
+    return (x >= tree.cx[k] ? 1 : 0) + (y >= tree.cy[k] ? 2 : 0);
+}
+
+function childFor(k, q) {
+    const existing = tree.child[4 * k + q];
+    if (existing !== -1) return existing;
+
+    const h = tree.half[k] / 2;
+    const c = newNode(
+        tree.cx[k] + (q & 1 ? h : -h),
+        tree.cy[k] + (q & 2 ? h : -h),
+        h
+    );
+    tree.child[4 * k + q] = c;
+    return c;
+}
+
+function addToLeaf(k, i) {
+    tree.next[i] = tree.first[k];
+    tree.first[k] = i;
+    tree.leafCount[k]++;
+}
+
+function insertBody(i) {
+    const x = tree.bx[i];
+    const y = tree.by[i];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+    let k = 0;
+    let depth = 0;
+
+    for (;;) {
+        if (tree.leaf[k]) {
+            // Room in this leaf (or bodies piled on top of each other): add it
+            if (tree.leafCount[k] < LEAF_CAPACITY || depth >= TREE_MAX_DEPTH) {
+                addToLeaf(k, i);
+                return;
+            }
+
+            // Full: split into four, moving the bodies down one level
+            let j = tree.first[k];
+            tree.leaf[k] = 0;
+            tree.first[k] = -1;
+            tree.leafCount[k] = 0;
+            while (j !== -1) {
+                const nextJ = tree.next[j];
+                addToLeaf(childFor(k, quadrant(k, tree.bx[j], tree.by[j])), j);
+                j = nextJ;
+            }
+        }
+
+        // Go down into the right quarter
+        k = childFor(k, quadrant(k, x, y));
+        depth++;
+    }
+}
+
+function buildTree(list) {
+    const n = list.length;
+    tree.list = list;
+    tree.count = 0;
+
+    if (tree.next.length < n) {
+        const size = Math.max(n, tree.next.length * 2);
+        tree.next = new Int32Array(size);
+        tree.bx = new Float64Array(size);
+        tree.by = new Float64Array(size);
+        tree.bm = new Float64Array(size);
+    }
+    if (tree.capacity < n + 64) allocateTree(n + 64);
+    if (n === 0) return;
+
+    // Copy positions into fast arrays and find a root square that fits them all
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < n; i++) {
+        const b = list[i];
+        tree.bx[i] = b.x;
+        tree.by[i] = b.y;
+        tree.bm[i] = b.mass;
+        if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) continue;
+        if (b.x < minX) minX = b.x;
+        if (b.x > maxX) maxX = b.x;
+        if (b.y < minY) minY = b.y;
+        if (b.y > maxY) maxY = b.y;
+    }
+    if (minX === Infinity) return;
+
+    const half = Math.max(maxX - minX, maxY - minY) / 2 + 1;
+    newNode((minX + maxX) / 2, (minY + maxY) / 2, half);
+
+    for (let i = 0; i < n; i++) insertBody(i);
+
+    // Total mass and centre of mass, from the smallest squares up
+    const { bx, by, bm, next } = tree;
+    for (let k = tree.count - 1; k >= 0; k--) {
+        let m = 0, mx = 0, my = 0;
+
+        if (tree.leaf[k]) {
+            for (let j = tree.first[k]; j !== -1; j = next[j]) {
+                m += bm[j];
+                mx += bm[j] * bx[j];
+                my += bm[j] * by[j];
+            }
+        } else {
+            for (let q = 0; q < 4; q++) {
+                const c = tree.child[4 * k + q];
+                if (c === -1) continue;
+                const cm = tree.mass[c];
+                m += cm;
+                mx += cm * tree.comX[c];
+                my += cm * tree.comY[c];
+            }
+        }
+
+        tree.mass[k] = m;
+        tree.comX[k] = m > 0 ? mx / m : tree.cx[k];
+        tree.comY[k] = m > 0 ? my / m : tree.cy[k];
+    }
+}
+
+/*
+ * Walk the tree to find the pull at point (x, y).
+ * `self` is the index of the body at that point (so it doesn't pull on
+ * itself), or -1 for an empty point. Results go into the walk* variables.
+ * If `record` is given, the squares used as single masses and the bodies
+ * visited one by one are saved into it (for the tree visualisation).
+ */
+let walkAx = 0, walkAy = 0, walkPhi = 0, walkCount = 0, walkGroups = 0;
+const walkStack = new Int32Array(1024);
+
+function walkTree(x, y, self, theta2, eps2, record = null) {
+    const { cx, cy, half, mass, comX, comY, child, leaf, first, next, bx, by, bm } = tree;
+
+    let ax = 0, ay = 0, phi = 0, count = 0, groups = 0;
+    let sp = 0;
+    if (tree.count > 0) walkStack[sp++] = 0;
+
+    while (sp > 0) {
+        const k = walkStack[--sp];
+        const m = mass[k];
+        if (m === 0) continue;
+
+        if (leaf[k]) {
+            // A leaf: add each body inside exactly
+            for (let j = first[k]; j !== -1; j = next[j]) {
+                if (j === self) continue;
+                const dx = bx[j] - x;
+                const dy = by[j] - y;
+                const d2 = dx * dx + dy * dy + eps2;
+                const inv = 1 / Math.sqrt(d2);
+                const gm = G * bm[j] * inv;
+                ax += dx * gm * inv * inv;
+                ay += dy * gm * inv * inv;
+                phi -= gm;
+                count++;
+                if (record) record.singles.push(j);
+            }
+            continue;
+        }
+
+        const h = half[k];
+        const dx = comX[k] - x;
+        const dy = comY[k] - y;
+        const dist2 = dx * dx + dy * dy;
+
+        // Far enough away (square size / distance < theta), and the point
+        // isn't inside this square: treat everything in it as ONE mass
+        // sitting at its centre of mass
+        const outside = x < cx[k] - h || x > cx[k] + h || y < cy[k] - h || y > cy[k] + h;
+
+        if (outside && 4 * h * h < theta2 * dist2) {
+            const d2 = dist2 + eps2;
+            const inv = 1 / Math.sqrt(d2);
+            const gm = G * m * inv;
+            ax += dx * gm * inv * inv;
+            ay += dy * gm * inv * inv;
+            phi -= gm;
+            count++;
+            groups++;
+            if (record) record.groups.push(k);
+        } else {
+            // Too close: open the square and look at its four children
+            const base = 4 * k;
+            for (let q = 0; q < 4; q++) {
+                const c = child[base + q];
+                if (c !== -1) walkStack[sp++] = c;
+            }
+        }
+    }
+
+    walkAx = ax;
+    walkAy = ay;
+    walkPhi = phi;
+    walkCount = count;
+    walkGroups = groups;
+}
+
+/*
+ * The main Barnes-Hut force calculation.
+ *
+ * Bodies in the same leaf are close together, so they need almost the same
+ * list of "far squares" and "nearby bodies". Instead of walking the tree for
+ * every body, we walk it once per leaf (up to 16 bodies) and share the lists.
+ * The test for "far enough" uses the leaf body CLOSEST to each square, so
+ * it is at least as accurate as walking separately for each body.
+ */
+let groupNodes = new Int32Array(256);
+let groupBodies = new Int32Array(256);
+let groupNodeCount = 0;
+let groupBodyCount = 0;
+
+function pushGroupNode(k) {
+    if (groupNodeCount >= groupNodes.length) {
+        const bigger = new Int32Array(groupNodes.length * 2);
+        bigger.set(groupNodes);
+        groupNodes = bigger;
+    }
+    groupNodes[groupNodeCount++] = k;
+}
+
+function pushGroupBody(j) {
+    if (groupBodyCount >= groupBodies.length) {
+        const bigger = new Int32Array(groupBodies.length * 2);
+        bigger.set(groupBodies);
+        groupBodies = bigger;
+    }
+    groupBodies[groupBodyCount++] = j;
+}
+
+// Fill groupNodes (squares used as one mass) and groupBodies (bodies used
+// one by one) for every body in leaf `L`
+function gatherInteractions(L, theta2) {
+    const { cx, cy, half, mass, comX, comY, child, leaf, first, next, bx, by } = tree;
+
+    // The box around the bodies in this leaf
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let j = first[L]; j !== -1; j = next[j]) {
+        if (bx[j] < minX) minX = bx[j];
+        if (bx[j] > maxX) maxX = bx[j];
+        if (by[j] < minY) minY = by[j];
+        if (by[j] > maxY) maxY = by[j];
+    }
+
+    groupNodeCount = 0;
+    groupBodyCount = 0;
+
+    let sp = 0;
+    walkStack[sp++] = 0;
+
+    while (sp > 0) {
+        const k = walkStack[--sp];
+        if (mass[k] === 0) continue;
+
+        if (leaf[k]) {
+            for (let j = first[k]; j !== -1; j = next[j]) pushGroupBody(j);
+            continue;
+        }
+
+        const h = half[k];
+
+        // Squares that contain this leaf must always be opened
+        const containsLeaf = Math.abs(cx[L] - cx[k]) < h && Math.abs(cy[L] - cy[k]) < h;
+
+        // Distance from the square's centre of mass to the nearest point of the box
+        const dx = Math.max(minX - comX[k], 0, comX[k] - maxX);
+        const dy = Math.max(minY - comY[k], 0, comY[k] - maxY);
+        const dist2 = dx * dx + dy * dy;
+
+        if (!containsLeaf && 4 * h * h < theta2 * dist2) {
+            pushGroupNode(k);
+        } else {
+            const base = 4 * k;
+            for (let q = 0; q < 4; q++) {
+                const c = child[base + q];
+                if (c !== -1) walkStack[sp++] = c;
+            }
+        }
+    }
+}
+
+function computeForcesTree(list, isMain) {
+    buildTree(list);
+
+    const theta2 = theta * theta;
+    const eps2 = SOFTENING * SOFTENING;
+    const { leaf, leafCount, first, next, mass, comX, comY, bx, by, bm } = tree;
+    let total = 0;
+    let groups = 0;
+
+    for (let L = 0; L < tree.count; L++) {
+        if (!leaf[L] || leafCount[L] === 0) continue;
+
+        gatherInteractions(L, theta2);
+
+        for (let i = first[L]; i !== -1; i = next[i]) {
+            const x = bx[i];
+            const y = by[i];
+            let ax = 0, ay = 0, phi = 0;
+
+            // Far squares, each as one mass at its centre of mass
+            for (let n = 0; n < groupNodeCount; n++) {
+                const k = groupNodes[n];
+                const dx = comX[k] - x;
+                const dy = comY[k] - y;
+                const inv = 1 / Math.sqrt(dx * dx + dy * dy + eps2);
+                const gm = G * mass[k] * inv;
+                ax += dx * gm * inv * inv;
+                ay += dy * gm * inv * inv;
+                phi -= gm;
+            }
+
+            // Nearby bodies, one by one
+            for (let n = 0; n < groupBodyCount; n++) {
+                const j = groupBodies[n];
+                if (j === i) continue;
+                const dx = bx[j] - x;
+                const dy = by[j] - y;
+                const inv = 1 / Math.sqrt(dx * dx + dy * dy + eps2);
+                const gm = G * bm[j] * inv;
+                ax += dx * gm * inv * inv;
+                ay += dy * gm * inv * inv;
+                phi -= gm;
+            }
+
+            const b = list[i];
+            b.ax = ax;
+            b.ay = ay;
+            b.phi = phi;
+            total += groupNodeCount + groupBodyCount - 1;
+            groups += groupNodeCount;
+        }
+    }
+
+    if (isMain) {
+        solverStats.method = "bh";
+        solverStats.n = list.length;
+        solverStats.interactions = total;
+        solverStats.groups = groups;
+    }
+}
+
+// The leaf that body i ended up in (used by the tree visualisation)
+function leafOfBody(i) {
+    for (let L = 0; L < tree.count; L++) {
+        if (!tree.leaf[L]) continue;
+        for (let j = tree.first[L]; j !== -1; j = tree.next[j]) {
+            if (j === i) return L;
+        }
+    }
+    return -1;
 }
 
 /*
@@ -185,7 +676,7 @@ function computeAccelerations(list) {
  * energy error stays small and bounded instead of building up.
  * Needs accelerations to already be correct for the current positions.
  */
-function stepVerlet(list, dt) {
+function stepVerlet(list, dt, isMain = false) {
     for (const b of list) {
         b.vx += b.ax * dt / 2;
         b.vy += b.ay * dt / 2;
@@ -193,7 +684,7 @@ function stepVerlet(list, dt) {
         b.y += b.vy * dt;
     }
 
-    computeAccelerations(list);
+    computeForces(list, isMain);
 
     for (const b of list) {
         b.vx += b.ax * dt / 2;
@@ -207,10 +698,9 @@ function stepVerlet(list, dt) {
  *   velocity += acceleration * dt
  * Every step overshoots slightly outward, so orbits gain energy and spiral
  * out. Included so you can SEE why Verlet is better.
+ * Needs accelerations to already be correct for the current positions.
  */
 function stepEuler(list, dt) {
-    computeAccelerations(list);
-
     for (const b of list) {
         b.x += b.vx * dt;
         b.y += b.vy * dt;
@@ -220,11 +710,12 @@ function stepEuler(list, dt) {
 }
 
 function physicsStep() {
+    // Both methods start from gravity at the current positions. Verlet's last
+    // half-kick already computed it, so usually it's reused for free.
+    if (!accelerationsFresh) computeForces(bodies, true);
+
     if (integrator === "verlet") {
-        // Verlet's last half-kick already computed gravity at the current
-        // positions, so we reuse it: one gravity calculation per step.
-        if (!accelerationsFresh) computeAccelerations(bodies);
-        stepVerlet(bodies, DT);
+        stepVerlet(bodies, DT, true);
         accelerationsFresh = true;
     } else {
         stepEuler(bodies, DT);
@@ -237,23 +728,60 @@ function physicsStep() {
 }
 
 /*
- * Perfectly inelastic collisions: two touching bodies become one.
+ * COLLISIONS
+ *
+ * Perfectly inelastic: two touching bodies become one.
  * Mass and momentum are conserved exactly. Kinetic energy is not:
  * in reality it becomes heat.
+ *
+ * Checking every pair would be n^2 again. Instead we "sweep and prune":
+ * sort the bodies left to right, then each body only checks the bodies to
+ * its right that are close enough horizontally to possibly touch it.
  */
-function findTouchingPair() {
-    for (let i = 0; i < bodies.length; i++) {
-        for (let j = i + 1; j < bodies.length; j++) {
-            const a = bodies[i];
+function canCollide(a, b) {
+    return true;
+}
+
+let sweepOrder = new Int32Array(0);
+let sweepLeft = new Float64Array(0);
+
+function findTouchingPairs() {
+    const n = bodies.length;
+    if (sweepOrder.length < n) {
+        sweepOrder = new Int32Array(n * 2);
+        sweepLeft = new Float64Array(n * 2);
+    }
+
+    let maxRadius = 0;
+    for (let i = 0; i < n; i++) {
+        const b = bodies[i];
+        sweepLeft[i] = b.x - b.radius;   // left edge of each body
+        sweepOrder[i] = i;
+        if (b.radius > maxRadius) maxRadius = b.radius;
+    }
+
+    const order = sweepOrder.subarray(0, n);
+    order.sort((a, b) => sweepLeft[a] - sweepLeft[b]);
+
+    const pairs = [];
+
+    for (let s = 0; s < n; s++) {
+        const a = bodies[order[s]];
+        const right = a.x + a.radius; // right edge
+
+        for (let t = s + 1; t < n; t++) {
+            const j = order[t];
+            if (sweepLeft[j] > right) break; // everything further right is too far
             const b = bodies[j];
+            if (!canCollide(a, b)) continue;
             const dx = b.x - a.x;
             const dy = b.y - a.y;
             const touch = a.radius + b.radius;
-
-            if (dx * dx + dy * dy < touch * touch) return [a, b];
+            if (dx * dx + dy * dy < touch * touch) pairs.push([a, b]);
         }
     }
-    return null;
+
+    return pairs;
 }
 
 function mergeBodies(a, b) {
@@ -273,31 +801,44 @@ function mergeBodies(a, b) {
 
     effects.push({ x: big.x, y: big.y, radius: big.radius, age: 0, color: small.color });
 
-    bodies = bodies.filter(body => body !== small);
+    small.dead = true;
     if (selectedBody === small) selectedBody = big;
+    return small;
 }
 
 function handleCollisions() {
-    let pair;
     let merged = false;
 
-    while ((pair = findTouchingPair())) {
-        mergeBodies(pair[0], pair[1]);
-        merged = true;
+    // A merge can create a new overlap, so check again (a few rounds at most)
+    for (let round = 0; round < 4; round++) {
+        const pairs = findTouchingPairs();
+        if (pairs.length === 0) break;
+
+        for (const [a, b] of pairs) {
+            if (a.dead || b.dead) continue;
+            mergeBodies(a, b);
+            merged = true;
+        }
+
+        bodies = bodies.filter(b => !b.dead);
     }
 
     if (merged) {
         markSystemChanged();
-        refreshBodyList();
-        updateProperties();
+        bodyListDirty = true;
     }
 }
 
 /*
- * Energy of the whole system.
+ * ENERGY
  *   Kinetic   = sum of (1/2) m v^2
  *   Potential = sum over pairs of  -G m1 m2 / r   (softened the same way as the force)
  * With no outside forces the total should stay constant.
+ *
+ * measureEnergy checks every pair (exact, but slow for big systems).
+ * The live graph instead reuses the potential (phi) each body got during
+ * the gravity calculation: potential energy = 1/2 * sum of m * phi
+ * (the 1/2 is because each pair is counted from both ends).
  */
 function measureEnergy(list) {
     let kinetic = 0;
@@ -321,8 +862,23 @@ function measureEnergy(list) {
     return { kinetic, potential, total: kinetic + potential };
 }
 
+function measureEnergyFast() {
+    if (!accelerationsFresh) {
+        computeForces(bodies, true);
+        accelerationsFresh = true;
+    }
+
+    let kinetic = 0;
+    let potential = 0;
+    for (const b of bodies) {
+        kinetic += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
+        potential += 0.5 * b.mass * b.phi;
+    }
+    return { kinetic, potential, total: kinetic + potential };
+}
+
 function recordEnergy() {
-    const e = measureEnergy(bodies);
+    const e = measureEnergyFast();
 
     if (energyBaseline === null) {
         energyBaseline = {
@@ -425,6 +981,8 @@ function circularVelocity(x, y, mass, attractor) {
  * and run the physics forward without touching the real simulation.
  */
 function predictPath(start, velocity) {
+    if (bodies.length > PREDICT_DIRECT_LIMIT) return predictPathFrozen(start, velocity);
+
     const preset = BODY_TYPES[brush];
 
     const sim = bodies.map(b => ({
@@ -444,11 +1002,15 @@ function predictPath(start, velocity) {
     const points = [{ x: probe.x, y: probe.y }];
     let hit = null;
 
-    if (integrator === "verlet") computeAccelerations(sim);
+    computeForces(sim);
 
     for (let s = 0; s < steps && !hit; s++) {
-        if (integrator === "verlet") stepVerlet(sim, DT);
-        else stepEuler(sim, DT);
+        if (integrator === "verlet") {
+            stepVerlet(sim, DT);
+        } else {
+            stepEuler(sim, DT);
+            computeForces(sim);
+        }
 
         if (s % 3 === 0) points.push({ x: probe.x, y: probe.y });
 
@@ -467,6 +1029,57 @@ function predictPath(start, velocity) {
     }
 
     points.push({ x: probe.x, y: probe.y });
+    return { points, hit };
+}
+
+/*
+ * Preview for big systems: simulating thousands of bodies hundreds of steps
+ * ahead every frame would freeze the page. Instead, freeze everything where
+ * it is, build one Barnes-Hut tree, and fly only the new body through it.
+ * Good for short previews; less accurate the further ahead it looks.
+ */
+function predictPathFrozen(start, velocity) {
+    buildTree(bodies);
+
+    const preset = BODY_TYPES[brush];
+    const theta2 = 0.8 * 0.8;
+    const eps2 = SOFTENING * SOFTENING;
+    const obstacles = bodies.filter(b => b.radius >= 2);
+
+    let x = start.x, y = start.y, vx = velocity.vx, vy = velocity.vy;
+    walkTree(x, y, -1, theta2, eps2);
+    let ax = walkAx, ay = walkAy;
+
+    const points = [{ x, y }];
+    let hit = null;
+
+    for (let s = 0; s < 600 && !hit; s++) {
+        vx += ax * DT / 2;
+        vy += ay * DT / 2;
+        x += vx * DT;
+        y += vy * DT;
+        walkTree(x, y, -1, theta2, eps2);
+        ax = walkAx;
+        ay = walkAy;
+        vx += ax * DT / 2;
+        vy += ay * DT / 2;
+
+        if (s % 3 === 0) points.push({ x, y });
+
+        if (options.merge) {
+            for (const o of obstacles) {
+                const dx = o.x - x;
+                const dy = o.y - y;
+                const touch = o.radius + preset.radius;
+                if (dx * dx + dy * dy < touch * touch) {
+                    hit = { x, y };
+                    break;
+                }
+            }
+        }
+    }
+
+    points.push({ x, y });
     return { points, hit };
 }
 
@@ -639,6 +1252,36 @@ const SCENARIOS = {
         }
     },
 
+    planetFormation: {
+        fit: 360,
+        note: "1,500 rocks orbit a young star. Rocks that touch merge, slowly growing into planets, roughly how real planets formed. Far too many bodies to check every pair, so the Barnes-Hut solver takes over.",
+        build() {
+            const sun = addBody({ type: "star", name: "Young Sun", x: 0, y: 0, radius: 18 });
+            const random = seededRandom(3);
+            const rockColors = ["#a8a29e", "#d6d3d1", "#c2410c", "#a16207", "#78716c"];
+
+            for (let i = 0; i < 1500; i++) {
+                // More rocks further out, since there's more room there
+                const distance = 70 + Math.sqrt(random()) * 260;
+                const angle = random() * Math.PI * 2;
+                const x = distance * Math.cos(angle);
+                const y = distance * Math.sin(angle);
+
+                // Nearly circular orbits, with a 3% random wobble so orbits cross
+                const v = circularVelocity(x, y, 0.1, sun);
+                const speed = Math.hypot(v.vx, v.vy);
+                addBody({
+                    type: "rock",
+                    name: "Rock " + (i + 1),
+                    x, y,
+                    vx: v.vx + (random() - 0.5) * 0.06 * speed,
+                    vy: v.vy + (random() - 0.5) * 0.06 * speed,
+                    color: rockColors[i % rockColors.length]
+                });
+            }
+        }
+    },
+
     empty: {
         fit: 300,
         note: "Empty space. Pick a body type below the canvas and start throwing things.",
@@ -665,6 +1308,8 @@ function loadScenario(name) {
     editState.sources.clear();
     editState.target = null;
     editState.pausedByEdit = false;
+    speedRatio = 1;
+    bodyListDirty = false;
 
     scenario.build();
     zeroMomentum();
@@ -734,10 +1379,13 @@ function fitView(radius) {
 
     let r = radius;
     if (!r) {
-        r = 0;
-        for (const b of bodies) {
-            r = Math.max(r, Math.hypot(b.x - center.x, b.y - center.y) + b.radius);
-        }
+        // Fit 97% of the bodies, so a few that escaped far away don't
+        // force the view to zoom all the way out
+        const distances = bodies
+            .map(b => Math.hypot(b.x - center.x, b.y - center.y) + b.radius)
+            .sort((a, b) => a - b);
+        const index = Math.min(distances.length - 1, Math.floor(distances.length * 0.97));
+        r = distances.length > 20 ? distances[index] : (distances[distances.length - 1] || 0);
         r = Math.max(r * 1.15, 300);
     }
 
@@ -841,9 +1489,15 @@ const RINGS_PER_LEVEL = 2;
 function drawField() {
     const n = bodies.length;
 
+    // Big systems use the Barnes-Hut tree here too (about 50 pulls per
+    // square instead of n)
+    const useTreeForField = n > FIELD_TREE_LIMIT;
+    if (useTreeForField) buildTree(bodies);
+
     // Square size is chosen so the total work (squares x bodies) stays about
     // the same: small squares with few bodies, bigger ones with many.
-    const cell = clamp(Math.ceil(Math.sqrt(viewWidth * viewHeight * n / 300000)), 3, 8);
+    const work = useTreeForField ? 50 : n;
+    const cell = clamp(Math.ceil(Math.sqrt(viewWidth * viewHeight * work / 300000)), 3, 8);
     const cols = Math.ceil(viewWidth / cell);
     const rows = Math.ceil(viewHeight / cell);
 
@@ -865,11 +1519,16 @@ function drawField() {
             const wx = ((col + 0.5) * cell - viewWidth / 2) / camera.zoom + camera.x;
 
             let potential = 0;
-            for (let k = 0; k < n; k++) {
-                const b = bodies[k];
-                const dx = wx - b.x;
-                const dy = wy - b.y;
-                potential += b.mass / Math.sqrt(dx * dx + dy * dy + eps2);
+            if (useTreeForField) {
+                walkTree(wx, wy, -1, 1.0, eps2);
+                potential = -walkPhi / G;
+            } else {
+                for (let k = 0; k < n; k++) {
+                    const b = bodies[k];
+                    const dx = wx - b.x;
+                    const dy = wy - b.y;
+                    potential += b.mass / Math.sqrt(dx * dx + dy * dy + eps2);
+                }
             }
 
             fieldLevels[row * cols + col] = Math.log2(1 + G * potential);
@@ -922,10 +1581,17 @@ function drawField() {
 
 // ---------- Trails ----------
 
+// Big systems get short trails: thousands of long trails would be slow
+// to draw and would cover the screen
+function trailLimit() {
+    return bodies.length > 300 ? 30 : TRAIL_LENGTH;
+}
+
 function recordTrails() {
+    const limit = trailLimit();
     for (const b of bodies) {
         b.trail.push({ x: b.x, y: b.y });
-        if (b.trail.length > TRAIL_LENGTH) b.trail.shift();
+        while (b.trail.length > limit) b.trail.shift();
     }
 }
 
@@ -934,7 +1600,7 @@ function drawTrails() {
     ctx.lineWidth = 1.5 / camera.zoom;
     ctx.lineJoin = "round";
 
-    const chunks = 6;
+    const chunks = bodies.length > 300 ? 2 : 6;
 
     for (const b of bodies) {
         const trail = b.trail;
@@ -959,13 +1625,16 @@ function drawTrails() {
 
 // ---------- Bodies ----------
 
-// Direction toward the brightest nearby star, so planets are lit on that side
+// Direction toward the brightest nearby star, so planets are lit on that side.
+// `lightSources` is the list of stars, collected once per frame in render().
+let lightSources = [];
+
 function lightDirection(body) {
     let best = null;
     let bestValue = 0;
 
-    for (const b of bodies) {
-        if (b === body || b.type !== "star") continue;
+    for (const b of lightSources) {
+        if (b === body) continue;
         const d2 = (b.x - body.x) ** 2 + (b.y - body.y) ** 2 + 1;
         const value = b.mass / d2;
         if (value > bestValue) {
@@ -983,6 +1652,16 @@ function lightDirection(body) {
 
 function drawBody(b) {
     const { x, y, radius: r } = b;
+
+    // Tiny rocks and moons: a plain dot is much faster than a shaded sphere,
+    // and looks the same at a few pixels wide
+    if (SMALL_TYPES.has(b.type) && r * camera.zoom < 3) {
+        const size = Math.max(r, 0.9 / camera.zoom);
+        ctx.fillStyle = b.color;
+        ctx.fillRect(x - size, y - size, size * 2, size * 2);
+        if (b === selectedBody) drawSelectionRing(b);
+        return;
+    }
 
     if (b.type === "star") {
         const glow = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 4);
@@ -1039,16 +1718,18 @@ function drawBody(b) {
         ctx.fill();
     }
 
-    if (b === selectedBody) {
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.lineWidth = 1.5 / camera.zoom;
-        ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
-        ctx.lineDashOffset = -performance.now() / 60 / camera.zoom;
-        ctx.beginPath();
-        ctx.arc(x, y, r + 6 / camera.zoom, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-    }
+    if (b === selectedBody) drawSelectionRing(b);
+}
+
+function drawSelectionRing(b) {
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 1.5 / camera.zoom;
+    ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
+    ctx.lineDashOffset = -performance.now() / 60 / camera.zoom;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.radius + 6 / camera.zoom, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
 }
 
 function drawArrow(x1, y1, x2, y2, color, width) {
@@ -1080,9 +1761,16 @@ function drawArrow(x1, y1, x2, y2, color, width) {
 
 // Green = velocity, orange = acceleration from gravity
 function drawVectors() {
-    if (!accelerationsFresh) computeAccelerations(bodies);
+    if (!accelerationsFresh) {
+        computeForces(bodies, true);
+        accelerationsFresh = true;
+    }
+
+    // In big systems, only the selected body and big bodies get arrows
+    const crowded = bodies.length > 200;
 
     for (const b of bodies) {
+        if (crowded && b !== selectedBody && SMALL_TYPES.has(b.type)) continue;
         const start = b.radius;
 
         const speed = Math.hypot(b.vx, b.vy);
@@ -1128,9 +1816,13 @@ function drawLabels() {
     ctx.textAlign = "center";
 
     const crowded = bodies.length > 14;
+    const veryCrowded = bodies.length > 60;
 
     for (const b of bodies) {
-        if (b !== selectedBody && crowded && b.type === "moon") continue;
+        if (b !== selectedBody) {
+            if (crowded && SMALL_TYPES.has(b.type)) continue;
+            if (veryCrowded && b.type === "planet") continue;
+        }
         const p = worldToScreen(b.x, b.y);
         if (p.x < -50 || p.y < -50 || p.x > viewWidth + 50 || p.y > viewHeight + 50) continue;
 
@@ -1289,6 +1981,86 @@ function drawEnergyChart() {
 
 // ---------- Main render ----------
 
+// ---------- Barnes-Hut tree view ----------
+
+// What the selected body's group used last time the tree was drawn
+let treeView = null;
+
+function drawTreeOverlay() {
+    treeView = null;
+    if (bodies.length === 0) return;
+
+    buildTree(bodies);
+    useWorldTransform();
+
+    // Every square in the tree
+    ctx.lineWidth = 1 / camera.zoom;
+    ctx.strokeStyle = "rgba(148,163,184,0.22)";
+    ctx.beginPath();
+    for (let k = 0; k < tree.count; k++) {
+        const h = tree.half[k];
+        ctx.rect(tree.cx[k] - h, tree.cy[k] - h, 2 * h, 2 * h);
+    }
+    ctx.stroke();
+
+    // What the selected body's group uses
+    if (!selectedBody) return;
+    const i = bodies.indexOf(selectedBody);
+    const L = i >= 0 ? leafOfBody(i) : -1;
+    if (L < 0) return;
+
+    gatherInteractions(L, theta * theta);
+    const sx = selectedBody.x;
+    const sy = selectedBody.y;
+
+    // Far squares: shaded, with a line to the dot where their mass is counted
+    ctx.fillStyle = "rgba(251,146,60,0.10)";
+    ctx.strokeStyle = "rgba(251,146,60,0.75)";
+    ctx.lineWidth = 1.2 / camera.zoom;
+    for (let n = 0; n < groupNodeCount; n++) {
+        const k = groupNodes[n];
+        const h = tree.half[k];
+        ctx.fillRect(tree.cx[k] - h, tree.cy[k] - h, 2 * h, 2 * h);
+        ctx.strokeRect(tree.cx[k] - h, tree.cy[k] - h, 2 * h, 2 * h);
+    }
+
+    ctx.strokeStyle = "rgba(251,146,60,0.35)";
+    ctx.beginPath();
+    for (let n = 0; n < groupNodeCount; n++) {
+        const k = groupNodes[n];
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(tree.comX[k], tree.comY[k]);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = "#fb923c";
+    for (let n = 0; n < groupNodeCount; n++) {
+        const k = groupNodes[n];
+        ctx.beginPath();
+        ctx.arc(tree.comX[k], tree.comY[k], 3 / camera.zoom, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Nearby bodies: lines to each one
+    ctx.strokeStyle = "rgba(34,211,238,0.45)";
+    ctx.beginPath();
+    for (let n = 0; n < groupBodyCount; n++) {
+        const b = bodies[groupBodies[n]];
+        if (b === selectedBody) continue;
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+
+    // The selected body's own square
+    const h = tree.half[L];
+    ctx.strokeStyle = "#22d3ee";
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.strokeRect(tree.cx[L] - h, tree.cy[L] - h, 2 * h, 2 * h);
+
+    treeView = { groups: groupNodeCount, singles: groupBodyCount - 1, n: bodies.length };
+}
+
 function render() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#02040b";
@@ -1300,6 +2072,9 @@ function render() {
 
     if (options.trails) drawTrails();
 
+    if (options.tree) drawTreeOverlay();
+
+    lightSources = bodies.filter(b => b.type === "star");
     useWorldTransform();
     for (const b of bodies) drawBody(b);
 
@@ -1338,11 +2113,22 @@ function sliderFromMass(mass) {
     return (Math.log10(Math.max(mass, 0.1)) + 1) * 1000 / 6;
 }
 
+// Show at most this many rows: thousands of rows would slow the page down
+const BODY_LIST_LIMIT = 60;
+
 function refreshBodyList() {
+    bodyListDirty = false;
     const list = document.getElementById("bodyList");
     list.innerHTML = "";
 
-    for (const body of bodies) {
+    // Big systems: list the heaviest bodies (plus the selected one)
+    let shown = bodies;
+    if (bodies.length > BODY_LIST_LIMIT) {
+        shown = [...bodies].sort((a, b) => b.mass - a.mass).slice(0, BODY_LIST_LIMIT);
+        if (selectedBody && !shown.includes(selectedBody)) shown.push(selectedBody);
+    }
+
+    for (const body of shown) {
         const item = document.createElement("div");
         item.className = "body-item" + (body === selectedBody ? " selected" : "");
 
@@ -1363,7 +2149,56 @@ function refreshBodyList() {
         list.appendChild(item);
     }
 
-    document.getElementById("bodyCount").textContent = "(" + bodies.length + ")";
+    if (shown.length < bodies.length) {
+        const more = document.createElement("div");
+        more.className = "body-item more";
+        more.textContent = "+ " + (bodies.length - shown.length).toLocaleString() +
+            " smaller bodies (click them on the canvas)";
+        list.appendChild(more);
+    }
+
+    document.getElementById("bodyCount").textContent = "(" + bodies.length.toLocaleString() + ")";
+}
+
+// 1234 -> "1,234", 45678 -> "46k", 1234567 -> "1.2M"
+function formatCount(value) {
+    if (value >= 1e6) return (value / 1e6).toFixed(1) + "M";
+    if (value >= 1e4) return Math.round(value / 1e3) + "k";
+    return Math.round(value).toLocaleString();
+}
+
+let lastStatsHtml = "";
+
+function refreshSolverStats() {
+    const n = solverStats.n;
+    const pairs = n * (n - 1) / 2;
+    let html;
+
+    if (n < 2) {
+        html = "Add some bodies to see the gravity calculation.";
+    } else if (solverStats.method === "direct") {
+        html = "<b>Direct</b>: every pair is checked, <b>" + formatCount(pairs) +
+            "</b> pair calculations per step.";
+    } else {
+        const ratio = pairs / Math.max(1, solverStats.interactions);
+        html = "<b>Barnes-Hut</b>: <b>" + formatCount(solverStats.interactions) +
+            "</b> calculations per step (about " + formatCount(solverStats.interactions / n) +
+            " per body). Direct would need <b>" + formatCount(pairs) + "</b> pairs";
+        html += ratio >= 1.05
+            ? ", <span class=\"speedup\">" + ratio.toFixed(1) + "&times; more work</span>."
+            : ". With this few bodies the tree doesn't save work yet.";
+    }
+
+    if (options.tree && treeView) {
+        html += "<br>Selected body's group: <b>" + treeView.groups + "</b> far squares + <b>" +
+            treeView.singles + "</b> nearby bodies, instead of " +
+            formatCount(treeView.n - 1) + " separate bodies.";
+    }
+
+    if (html !== lastStatsHtml) {
+        document.getElementById("solverStats").innerHTML = html;
+        lastStatsHtml = html;
+    }
 }
 
 function selectBody(body) {
@@ -1426,12 +2261,19 @@ function refreshLiveReadouts(force = false) {
     }
 
     const integratorName = integrator === "verlet" ? "Velocity Verlet" : "Euler";
+    const solverName = solverStats.method === "bh" ? "Barnes-Hut" : "Direct";
     const pauseText = running ? "" : editState.pausedByEdit ? "PAUSED while editing · " : "PAUSED · ";
+    const slowText = running && speedRatio < 0.85
+        ? " (computer keeping up at " + (simulationSpeed * speedRatio).toFixed(1) + "x)"
+        : "";
     document.getElementById("hud").textContent =
         pauseText +
         "t = " + simTime.toFixed(1) +
-        " · " + bodies.length + " bodies · " + integratorName +
-        " · " + simulationSpeed.toFixed(1) + "x";
+        " · " + bodies.length.toLocaleString() + " bodies · " + integratorName +
+        " · " + solverName +
+        " · " + simulationSpeed.toFixed(1) + "x" + slowText;
+
+    refreshSolverStats();
 }
 
 function updatePlayButton() {
@@ -1533,14 +2375,26 @@ function deleteSelected() {
     updateProperties();
 }
 
+// The body under the mouse. If several are close, pick the one whose edge
+// is nearest, so clicking on a big star picks the star, not a rock near it.
 function bodyAtScreen(sx, sy) {
+    let best = null;
+    let bestScore = Infinity;
+
     for (let i = bodies.length - 1; i >= 0; i--) {
         const b = bodies[i];
         const p = worldToScreen(b.x, b.y);
-        const hitRadius = Math.max(b.radius * camera.zoom, 7) + 3;
-        if (Math.hypot(sx - p.x, sy - p.y) <= hitRadius) return b;
+        const radius = b.radius * camera.zoom;
+        const distance = Math.hypot(sx - p.x, sy - p.y);
+        if (distance > Math.max(radius, 7) + 3) continue;
+
+        const score = distance - radius;
+        if (score < bestScore) {
+            bestScore = score;
+            best = b;
+        }
     }
-    return null;
+    return best;
 }
 
 function eventPosition(event) {
@@ -1695,7 +2549,20 @@ document.getElementById("integratorSelect").onchange = event => {
     markSystemChanged();
 };
 
+document.getElementById("solverSelect").onchange = event => {
+    solverMode = event.target.value;
+    markSystemChanged();
+    event.target.blur();
+};
+
+document.getElementById("thetaSlider").oninput = event => {
+    theta = Number(event.target.value);
+    document.getElementById("thetaValue").textContent = theta.toFixed(2);
+    markSystemChanged();
+};
+
 const toggles = {
+    treeToggle: "tree",
     autoPauseToggle: "autoPause",
     trailToggle: "trails",
     vectorToggle: "vectors",
@@ -1709,6 +2576,9 @@ for (const [id, key] of Object.entries(toggles)) {
         options[key] = event.target.checked;
         if (key === "vectors") {
             document.getElementById("vectorLegend").classList.toggle("hidden", !options.vectors);
+        }
+        if (key === "tree") {
+            document.getElementById("treeLegend").classList.toggle("hidden", !options.tree);
         }
         event.target.blur();
     };
@@ -1891,9 +2761,24 @@ function frame(now) {
             stepAccumulator = 0;
         }
 
-        for (let i = 0; i < steps; i++) physicsStep();
+        // Run the steps, but stop if physics has used up this frame's time
+        // budget, so the page stays smooth with thousands of bodies.
+        // Then the simulation just runs slower than asked.
+        const wanted = steps;
+        const physicsStart = performance.now();
+        let done = 0;
+        while (done < steps) {
+            physicsStep();
+            done++;
+            if (performance.now() - physicsStart > PHYSICS_BUDGET_MS) break;
+        }
+        if (done < wanted) stepAccumulator = 0;
 
-        if (steps > 0) {
+        // Smoothed "how much of the requested speed are we managing?"
+        const expected = simulationSpeed * STEPS_PER_SECOND * elapsed / 1000;
+        if (expected > 0) speedRatio = speedRatio * 0.95 + Math.min(1, done / expected) * 0.05;
+
+        if (done > 0) {
             recordTrails();
             recordEnergy();
         }
@@ -1904,6 +2789,10 @@ function frame(now) {
 
     frameCount++;
     if (frameCount % 3 === 0) {
+        if (bodyListDirty) {
+            refreshBodyList();
+            updateProperties();
+        }
         drawEnergyChart();
         refreshLiveReadouts();
     }
