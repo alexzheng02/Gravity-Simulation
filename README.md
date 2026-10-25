@@ -24,6 +24,8 @@ No install needed.
 - **Try scenarios:** Solar System, Binary Stars, Figure-8 three-body orbit, Gravity Assist, Black Hole Disk, Random Cluster.
 - **Compare integrators:** switch between Euler and Velocity Verlet and watch the energy graph.
 - **See the physics:** velocity and gravity arrows, a gravity field view with equipotential rings, and a "How it works" panel in the app.
+- **Thousands of bodies:** the Barnes-Hut algorithm (with a tree view) runs Planet Formation with 1,500 rocks.
+- **Galaxy collision:** 3,000 stars show how tidal tails form.
 
 ### Auto-pause while editing
 
@@ -76,5 +78,4 @@ By default, the simulation keeps running while you edit a body, so you can watch
 
 ## Ideas for next steps
 
-- Barnes-Hut tree for thousands of bodies
-- Galaxy collision scenario
+- **Formula display tab:** Add a collapsible section showing equations (F=ma, a=GM/r², KE=½mv², etc)
