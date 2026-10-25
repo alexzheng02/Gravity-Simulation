@@ -27,6 +27,7 @@
             <option value="blackhole">Black Hole Disk</option>
             <option value="cluster">Random Cluster</option>
             <option value="planetFormation">Planet Formation (1,500 rocks)</option>
+            <option value="galaxies">Galaxy Collision (3,000 stars)</option>
             <option value="empty">Empty Space</option>
         </select>
     </div>
@@ -143,7 +144,7 @@
             </p>
 
             <p class="legend-note hidden" id="treeLegend">
-                Each square holds up to 16 bodies before splitting into four.
+                Each square holds up to 8 bodies before splitting into four.
                 Select a body to see what its group uses:
                 <br><span class="dot" style="background:#fb923c"></span>far squares, each pulling as one mass at its dot
                 <br><span class="dot" style="background:#22d3ee"></span>nearby bodies, calculated one by one
@@ -303,6 +304,32 @@
                 tree", select a body, and move the &theta; slider to see the
                 trade-off between speed and accuracy. The energy graph shows
                 the small extra error compared to the exact method.
+            </p>
+
+            <h3>8. Colliding galaxies</h3>
+            <p>
+                Each galaxy is a black hole plus 1,500 "stars" (each one
+                standing for millions of real stars) on circular orbits. Real
+                stars are so far apart that they practically never hit each
+                other, so here they pass straight through each other: a
+                <em>collisionless</em> system. Only gravity shapes it.
+            </p>
+            <p>
+                Tidal tails form because gravity weakens with distance: the
+                other galaxy pulls its near side harder than its centre, and
+                its centre harder than its far side, stretching it out. A
+                galaxy spinning the same way as the encounter (prograde) stays
+                lined up with that stretch for longer, so its outer stars get
+                flung into long tails. One spinning the other way (retrograde)
+                barely changes. Alar and Juri Toomre showed this with a simple
+                computer model in 1972; it explained the strange shapes of
+                real galaxies like the Antennae.
+            </p>
+            <p>
+                Galaxy centres aren't points: the black hole sits in a dense
+                ball of stars. So this scenario uses more softening
+                (&epsilon; = 15), which also keeps the energy error around
+                0.1% instead of 5%.
             </p>
         </details>
 
