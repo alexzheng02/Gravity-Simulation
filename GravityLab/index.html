@@ -1,121 +1,337 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
-
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GravityLab</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<header>
-    <h1>GravityLab</h1>
-    <p>Interactive Celestial Physics Simulator</p>
+<header class="topbar">
+    <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+            <h1>GravityLab</h1>
+            <p>Interactive N-body gravity simulator</p>
+        </div>
+    </div>
+    <div class="scenario-picker">
+        <label for="scenarioSelect">Scenario</label>
+        <select id="scenarioSelect">
+            <option value="solar">Solar System</option>
+            <option value="sunPlanet">Star &amp; Planet</option>
+            <option value="binary">Binary Stars</option>
+            <option value="figure8">Figure-8 (three bodies)</option>
+            <option value="slingshot">Gravity Assist</option>
+            <option value="blackhole">Black Hole Disk</option>
+            <option value="cluster">Random Cluster</option>
+            <option value="planetFormation">Planet Formation (1,500 rocks)</option>
+            <option value="galaxies">Galaxy Collision (3,000 stars)</option>
+            <option value="empty">Empty Space</option>
+        </select>
+    </div>
 </header>
 
 <main class="app-layout">
 
     <section class="universe-container">
-        <canvas id="universe"></canvas>
+
+        <div class="canvas-wrap">
+            <canvas id="universe"></canvas>
+
+            <div class="hud" id="hud"></div>
+
+            <div class="scenario-note" id="scenarioNote"></div>
+
+            <div class="canvas-hint" id="canvasHint"></div>
+        </div>
 
         <div class="simulation-controls">
-            <button id="playPauseBtn">Pause</button>
+            <button id="playPauseBtn" class="primary">Pause</button>
             <button id="resetBtn">Reset</button>
+            <button id="clearTrailsBtn">Clear Trails</button>
+            <button id="centerViewBtn">Fit View</button>
 
-            <label>
-                Speed:
-                <input
-                    type="range"
-                    id="speedSlider"
-                    min="0.1"
-                    max="5"
-                    step="0.1"
-                    value="1"
-                >
-                <span id="speedValue">1x</span>
+            <label class="inline">
+                Speed
+                <input type="range" id="speedSlider" min="0.1" max="5" step="0.1" value="1">
+                <span id="speedValue">1.0x</span>
             </label>
 
-            <label>
-                <input
-                    type="checkbox"
-                    id="trailToggle"
-                    checked
-                >
-                Show Trails
+            <label class="inline">
+                Camera
+                <select id="cameraSelect">
+                    <option value="free">Free</option>
+                    <option value="com">Follow center of mass</option>
+                    <option value="selected">Follow selected body</option>
+                </select>
             </label>
         </div>
+
+        <div class="brush-bar">
+            <span class="brush-label">Tool:</span>
+            <button class="brush active" data-type="select">
+                <svg class="cursor-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                    <path d="M2 1 L10 6.2 L6.4 7 L4.6 11 Z" fill="currentColor"/>
+                </svg>Select / Pan <kbd>Esc</kbd>
+            </button>
+            <span class="brush-divider" aria-hidden="true"></span>
+            <button class="brush" data-type="planet">
+                <span class="swatch planet"></span>Planet <kbd>1</kbd>
+            </button>
+            <button class="brush" data-type="star">
+                <span class="swatch star"></span>Star <kbd>2</kbd>
+            </button>
+            <button class="brush" data-type="moon">
+                <span class="swatch moon"></span>Moon <kbd>3</kbd>
+            </button>
+            <button class="brush" data-type="blackhole">
+                <span class="swatch blackhole"></span>Black Hole <kbd>4</kbd>
+            </button>
+        </div>
+
     </section>
 
     <aside class="control-panel">
 
-        <h2>Celestial Bodies</h2>
+        <section class="panel-section">
+            <h2>Physics</h2>
 
-        <button id="addBodyBtn" class="add-button">
-            + Add Body
-        </button>
-
-        <div id="bodyList"></div>
-
-        <hr>
-
-        <h2>Body Properties</h2>
-
-        <p id="selectedBodyName">
-            Select a celestial body
-        </p>
-
-        <div id="bodyProperties" class="hidden">
-
-            <label>
-                Mass:
-                <span id="massValue"></span>
-                <input
-                    type="range"
-                    id="massSlider"
-                    min="1"
-                    max="20000"
-                    step="1"
-                >
+            <label class="field">
+                Integrator (how time steps forward)
+                <select id="integratorSelect">
+                    <option value="verlet">Velocity Verlet (stable)</option>
+                    <option value="euler">Euler (simple, drifts)</option>
+                </select>
             </label>
 
-            <label>
-                Radius:
-                <span id="radiusValue"></span>
-                <input
-                    type="range"
-                    id="radiusSlider"
-                    min="3"
-                    max="50"
-                    step="1"
-                >
+            <label class="field">
+                Gravity solver
+                <select id="solverSelect">
+                    <option value="auto">Auto (Barnes-Hut above 200 bodies)</option>
+                    <option value="direct">Direct (exact, every pair)</option>
+                    <option value="bh">Barnes-Hut (fast, approximate)</option>
+                </select>
             </label>
 
-            <label>
-                Velocity X:
-                <input
-                    type="number"
-                    id="vxInput"
-                    step="0.1"
-                >
-            </label>
+            <div class="field">
+                <label for="thetaSlider">
+                    Barnes-Hut accuracy (&theta;) <span class="value" id="thetaValue">0.60</span>
+                </label>
+                <input type="range" id="thetaSlider" min="0.1" max="1.5" step="0.05" value="0.6">
+                <span class="range-ends"><span>accurate, slower</span><span>rough, faster</span></span>
+            </div>
 
-            <label>
-                Velocity Y:
-                <input
-                    type="number"
-                    id="vyInput"
-                    step="0.1"
-                >
-            </label>
+            <p class="solver-stats" id="solverStats"></p>
 
-            <button id="deleteBodyBtn" class="delete-button">
-                Delete Body
-            </button>
+            <div class="toggles">
+                <label title="Pauses the simulation while you drag a slider or type in a box, then resumes">
+                    <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
+                </label>
+                <label><input type="checkbox" id="trailToggle" checked> Trails</label>
+                <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
+                <label><input type="checkbox" id="fieldToggle"> Gravity field</label>
+                <label><input type="checkbox" id="treeToggle"> Show Barnes-Hut tree</label>
+                <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
+                <label><input type="checkbox" id="labelToggle" checked> Labels</label>
+            </div>
 
-        </div>
+            <p class="legend-note hidden" id="vectorLegend">
+                <span class="dot" style="background:#4ade80"></span>velocity
+                <span class="dot" style="background:#fb923c"></span>acceleration (gravity)
+                <br>Arrow lengths are scaled down to fit on screen.
+            </p>
+
+            <p class="legend-note hidden" id="treeLegend">
+                Each square holds up to 8 bodies before splitting into four.
+                Select a body to see what its group uses:
+                <br><span class="dot" style="background:#fb923c"></span>far squares, each pulling as one mass at its dot
+                <br><span class="dot" style="background:#22d3ee"></span>nearby bodies, calculated one by one
+            </p>
+        </section>
+
+        <section class="panel-section">
+            <h2>Energy</h2>
+            <canvas id="energyChart"></canvas>
+            <div class="energy-legend">
+                <span><i style="background:#38bdf8"></i>Kinetic</span>
+                <span><i style="background:#f87171"></i>Potential</span>
+                <span><i style="background:#f8fafc"></i>Total</span>
+            </div>
+            <p class="drift">
+                Total energy drift: <b id="driftValue">0.000%</b>
+            </p>
+        </section>
+
+        <section class="panel-section">
+            <h2>Bodies <span class="count" id="bodyCount"></span></h2>
+            <div id="bodyList"></div>
+        </section>
+
+        <section class="panel-section">
+            <h2>Selected Body</h2>
+
+            <p id="selectedBodyName" class="muted">Click a body to inspect it</p>
+
+            <div id="bodyProperties" class="hidden">
+
+                <div class="field">
+                    <label for="massInput">Mass</label>
+                    <div class="slider-row">
+                        <input type="range" id="massSlider" min="0" max="1000" step="1" aria-label="Mass slider">
+                        <input type="number" id="massInput" min="0.01" max="1000000" step="any">
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label for="radiusInput">Radius</label>
+                    <div class="slider-row">
+                        <input type="range" id="radiusSlider" min="1" max="60" step="0.5" aria-label="Radius slider">
+                        <input type="number" id="radiusInput" min="1" max="60" step="0.5">
+                    </div>
+                </div>
+
+                <div class="two-col">
+                    <label class="field">
+                        Velocity X
+                        <input type="number" id="vxInput" step="0.1">
+                    </label>
+                    <label class="field">
+                        Velocity Y
+                        <input type="number" id="vyInput" step="0.1">
+                    </label>
+                </div>
+
+                <p class="muted small">Speed: <b id="speedReadout">0</b></p>
+
+                <div class="two-col">
+                    <button id="orbitBtn">Make it orbit</button>
+                    <button id="deleteBodyBtn" class="danger">Delete</button>
+                </div>
+
+            </div>
+        </section>
+
+        <details class="panel-section explainer">
+            <summary>How it works</summary>
+
+            <h3>1. Newton's law of gravity</h3>
+            <p>
+                Every body pulls on every other body. The pull from a body
+                of mass <i>M</i> at distance <i>r</i> gives an acceleration of
+                <code>a = G&middot;M / r&sup2;</code>, pointing toward it.
+                Each body adds up the pulls from all the others. We visit
+                each <em>pair</em> only once and apply equal and opposite
+                forces (Newton's third law), which halves the work.
+            </p>
+
+            <h3>2. Stepping through time</h3>
+            <p>
+                A computer can't run time continuously, so we take tiny
+                steps of length <code>dt</code>.
+            </p>
+            <p>
+                <b>Euler</b> moves each body using its current velocity, then
+                updates the velocity. It's simple, but every step adds a little
+                energy, so orbits slowly spiral outward.
+            </p>
+            <p>
+                <b>Velocity Verlet</b> does a half-step "kick" to the velocity,
+                moves ("drift"), recomputes gravity, then does the second
+                half-kick. It's <em>symplectic</em>: it preserves the geometry of
+                the motion, so energy errors stay tiny and don't grow. Switch
+                integrators and watch the energy graph.
+            </p>
+
+            <h3>3. Energy</h3>
+            <p>
+                Kinetic energy is <code>&frac12;mv&sup2;</code> and gravitational
+                potential energy is <code>&minus;G&middot;m&#8321;m&#8322; / r</code>.
+                With nothing outside the system, their sum should stay constant.
+                The white line on the graph is that total. A flat line means the
+                simulation is trustworthy.
+            </p>
+
+            <h3>4. Softening</h3>
+            <p>
+                Real gravity becomes infinite when two bodies touch
+                (<i>r</i> &rarr; 0). We use <code>r&sup2; + &epsilon;&sup2;</code>
+                with a small &epsilon; so very close passes don't explode.
+            </p>
+
+            <h3>5. Collisions</h3>
+            <p>
+                When two bodies touch they merge. Mass and momentum are
+                conserved exactly, but some kinetic energy turns into heat,
+                so the total energy line jumps (marked with a dashed line).
+                The amount lost is
+                <code>&frac12;&middot;&mu;&middot;v&sup2;</code>, where
+                <i>v</i> is their relative speed and
+                <code>&mu; = m&#8321;m&#8322; / (m&#8321; + m&#8322;)</code>.
+                The drift readout allows for exactly that loss, so it only
+                counts real numerical error. To find bodies quickly, collisions
+                use "sweep and prune": bodies are sorted left to right, and each
+                one only checks neighbours that overlap it horizontally.
+            </p>
+
+            <h3>6. The gravity field</h3>
+            <p>
+                The glow shows how deep the gravitational "well" is at each
+                point. The rings are lines of equal potential: a body released
+                at rest falls straight across them, downhill. Gravity has no
+                edge; it reaches forever and just gets weaker, so the glow fades
+                out smoothly instead of stopping.
+            </p>
+
+            <h3>7. Barnes-Hut: thousands of bodies</h3>
+            <p>
+                Checking every pair gets slow fast: 1,500 bodies means over a
+                million pairs, every step. The Barnes-Hut method (1986) splits
+                space into squares, then splits crowded squares into four
+                smaller ones, building a <em>quadtree</em>.
+            </p>
+            <p>
+                A distant cluster pulls almost exactly like one body with the
+                cluster's total mass at its centre of mass. So if a square is
+                small compared to its distance (<code>size / distance &lt; &theta;</code>),
+                its whole contents count as one pull. Nearby bodies are still
+                calculated one by one. The work grows like
+                <code>n log n</code> instead of <code>n&sup2;</code>.
+            </p>
+            <p>
+                The catch: it's an approximation. Turn on "Show Barnes-Hut
+                tree", select a body, and move the &theta; slider to see the
+                trade-off between speed and accuracy. The energy graph shows
+                the small extra error compared to the exact method.
+            </p>
+
+            <h3>8. Colliding galaxies</h3>
+            <p>
+                Each galaxy is a black hole plus 1,500 "stars" (each one
+                standing for millions of real stars) on circular orbits. Real
+                stars are so far apart that they practically never hit each
+                other, so here they pass straight through each other: a
+                <em>collisionless</em> system. Only gravity shapes it.
+            </p>
+            <p>
+                Tidal tails form because gravity weakens with distance: the
+                other galaxy pulls its near side harder than its centre, and
+                its centre harder than its far side, stretching it out. A
+                galaxy spinning the same way as the encounter (prograde) stays
+                lined up with that stretch for longer, so its outer stars get
+                flung into long tails. One spinning the other way (retrograde)
+                barely changes. Alar and Juri Toomre showed this with a simple
+                computer model in 1972; it explained the strange shapes of
+                real galaxies like the Antennae.
+            </p>
+            <p>
+                Galaxy centres aren't points: the black hole sits in a dense
+                ball of stars. So this scenario uses more softening
+                (&epsilon; = 15), which also keeps the energy error around
+                0.1% instead of 5%.
+            </p>
+        </details>
 
     </aside>
 
