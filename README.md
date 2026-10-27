@@ -11,7 +11,7 @@
 
 Built for the **SPS MathPhys (2026) Hackathon**, theme: **Visualization of Physical Processes**. Our process: **gravity between many bodies** (the N-body problem).
 
-<img width="1455" height="731" alt="Screenshot 2026-10-27 at 2 48 56 PM" src="https://github.com/user-attachments/assets/41fc0d2a-bff3-4686-8902-097411a17e41" />
+<img width="1600" alt="lumi Solar System with gravity pull sheet, orbital trails, and live equations for Azure" src="docs/solar-system-equations.png" />
 
 **▶ Try it in your browser:** https://alexzheng02.github.io/lumi/
 
@@ -83,7 +83,7 @@ By default, the simulation keeps running while you edit, so you can watch change
 
 Tick **Auto-pause while editing** in **⚙ Options** to pause instead while you place a body, drag one, move a slider or type in a box. It carries on when you finish, unless you had paused it yourself.
 
-<img width="1083" height="532" alt="Screenshot 2026-10-27 at 2 44 07 PM" src="https://github.com/user-attachments/assets/f02eede2-3a2b-4b55-96a9-b895446bfa04" />
+<img width="1210" alt="lumi Galaxy Collision showing two interacting galaxies with 3,000 stars" src="docs/galaxy-collision.png" />
 
 ---
 
