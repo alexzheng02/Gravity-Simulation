@@ -28,6 +28,7 @@
             <option value="cluster">Random Cluster</option>
             <option value="planetFormation">Planet Formation (1,500 rocks)</option>
             <option value="galaxies">Galaxy Collision (3,000 stars)</option>
+            <option value="asteroidBelt">Asteroid Belt &amp; Comet</option>
             <option value="empty">Empty Space</option>
         </select>
     </div>
@@ -89,11 +90,27 @@
             <button class="brush" data-type="blackhole">
                 <span class="swatch blackhole"></span>Black Hole <kbd>4</kbd>
             </button>
+            <button class="brush" data-type="asteroid">
+                <span class="swatch asteroid"></span>Asteroid <kbd>5</kbd>
+            </button>
+            <button class="brush" data-type="comet">
+                <span class="swatch comet"></span>Comet <kbd>6</kbd>
+            </button>
+            <button class="brush" data-type="neutronstar">
+                <span class="swatch neutronstar"></span>Neutron Star <kbd>7</kbd>
+            </button>
         </div>
 
     </section>
 
     <aside class="control-panel">
+
+        <nav class="panel-tabs" role="tablist">
+            <button class="panel-tab active" data-tab="controls" role="tab">Controls</button>
+            <button class="panel-tab" data-tab="equations" role="tab">Equations <kbd>E</kbd></button>
+        </nav>
+
+        <div class="tab-page" id="tab-controls">
 
         <section class="panel-section">
             <h2>Physics</h2>
@@ -131,6 +148,7 @@
                 </label>
                 <label><input type="checkbox" id="trailToggle" checked> Trails</label>
                 <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
+                <label title="The ellipse Kepler's laws predict for the selected body"><input type="checkbox" id="orbitToggle" checked> Predicted orbit (Kepler ellipse)</label>
                 <label><input type="checkbox" id="fieldToggle"> Gravity field</label>
                 <label><input type="checkbox" id="treeToggle"> Show Barnes-Hut tree</label>
                 <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
@@ -194,6 +212,19 @@
 
                 <div class="two-col">
                     <label class="field">
+                        Position X
+                        <input type="number" id="xInput" step="1">
+                    </label>
+                    <label class="field">
+                        Position Y
+                        <input type="number" id="yInput" step="1">
+                    </label>
+                </div>
+
+                <p class="muted small">Tip: drag a body on the canvas to move it.</p>
+
+                <div class="two-col">
+                    <label class="field">
                         Velocity X
                         <input type="number" id="vxInput" step="0.1">
                     </label>
@@ -206,9 +237,25 @@
                 <p class="muted small">Speed: <b id="speedReadout">0</b></p>
 
                 <div class="two-col">
+                    <label class="field">
+                        Orbit around
+                        <select id="orbitAroundSelect" class="reference-select"></select>
+                    </label>
+                    <label class="field">
+                        Direction
+                        <select id="orbitDirection">
+                            <option value="1">&#8634; Anticlockwise</option>
+                            <option value="-1">&#8635; Clockwise</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div class="two-col">
                     <button id="orbitBtn">Make it orbit</button>
                     <button id="deleteBodyBtn" class="danger">Delete</button>
                 </div>
+
+                <button id="showEquationsBtn" class="link-button">See the equations for this body &rarr;</button>
 
             </div>
         </section>
@@ -331,7 +378,48 @@
                 (&epsilon; = 15), which also keeps the energy error around
                 0.1% instead of 5%.
             </p>
+
+            <h3>9. Asteroids, comets and neutron stars</h3>
+            <p>
+                Gravity treats them all the same; only their mass and size
+                differ. A <b>comet</b>'s tail always points <em>away</em> from
+                the nearest star, not behind it: sunlight and the solar wind
+                push gas and dust off the comet. The tail grows as the comet
+                gets closer and hotter. A <b>neutron star</b> is the collapsed
+                core of a giant star: twice the Sun's mass squeezed into a
+                ball the size of a city. From far away it pulls exactly like
+                a normal star of the same mass. You can only tell the
+                difference up close.
+            </p>
+
+            <h3>10. The Equations tab and Kepler's laws</h3>
+            <p>
+                Select a body and open the Equations tab to see each formula
+                with the simulation's live numbers plugged in. The orbit card
+                treats the body and the one it orbits as a pair on their own
+                (the "two-body problem"), which has an exact answer: an
+                ellipse with the heavier body at one focus (Kepler's 1st law).
+                The body moves fastest when it's closest (2nd law), and the
+                time for one lap grows like <code>T&sup2; &prop; a&sup3;</code>
+                (3rd law). The dashed ellipse on the canvas is that prediction.
+                The other bodies pull on it too, so the real path slowly
+                drifts away from the ellipse.
+            </p>
         </details>
+
+        </div>
+
+        <div class="tab-page hidden" id="tab-equations">
+            <section class="panel-section">
+                <h2>Live equations</h2>
+                <p class="muted small" id="equationsIntro"></p>
+                <label class="field" id="equationsReference">
+                    Compared with
+                    <select id="equationsReferenceSelect" class="reference-select"></select>
+                </label>
+                <div id="equationCards"></div>
+            </section>
+        </div>
 
     </aside>
 
