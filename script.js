@@ -96,7 +96,7 @@ const options = {
     trails: true,
     vectors: false,
     orbit: true,
-    field: false,
+    field: "off",      // gravity field view: "off", "map" (contour map) or "sheet" (rubber sheet)
     grid: true,
     spinView: false,
     tree: false,
@@ -1846,17 +1846,47 @@ function project(x, y, z) {
 }
 
 /*
- * The opposite: which point of the flat plane at height `planeZ` is under
- * the pixel (sx, sy)? Follows the ray from the camera through that pixel
- * until it hits the plane. null if it never does (looking away from it).
+ * The opposite: which point of a plane is under the pixel (sx, sy)?
+ * Follows the ray from the camera through that pixel until it hits the plane
+ * through `point` at right angles to `normal`. null if it never does (the
+ * plane is behind the camera, or the ray runs along it).
  */
-function screenToPlane(sx, sy, planeZ = 0) {
+function screenToPlane(sx, sy, point, normal) {
     const ray = new THREE.Vector3(sx / viewWidth * 2 - 1, 1 - sy / viewHeight * 2, 0.5);
     ray.unproject(view).sub(view.position).normalize();
-    if (Math.abs(ray.z) < 1e-4) return null;
-    const t = (planeZ - view.position.z) / ray.z;
+    const eye = view.position;
+    const along = ray.x * normal.x + ray.y * normal.y + ray.z * normal.z;
+    if (Math.abs(along) < 1e-6) return null;
+    const t = ((point.x - eye.x) * normal.x + (point.y - eye.y) * normal.y + (point.z - eye.z) * normal.z) / along;
     if (t <= 0 || t > view.far) return null;
-    return { x: view.position.x + ray.x * t, y: view.position.y + ray.y * t, z: planeZ };
+    return {
+        x: eye.x + ray.x * t,
+        y: eye.y + ray.y * t,
+        // On a flat plane, use its height exactly (not with a rounding error)
+        z: normal === UP ? point.z : eye.z + ray.z * t
+    };
+}
+
+/*
+ * THE WORKING PLANE
+ * A flat plane through the point the camera looks at. New bodies are placed
+ * on it, the grid and the gravity field are drawn on it, and the Move tool
+ * slides bodies parallel to it. Moving the view up or down (Q / Z), Fit View
+ * or following a body changes its height.
+ * Seen almost edge-on, a click would land very far away (or nowhere), so then
+ * an upright plane facing the camera is used instead.
+ */
+const UP = { x: 0, y: 0, z: 1 };
+const EDGE_ON = Math.sin(10 * Math.PI / 180); // closer than 10 degrees to edge-on
+
+function cameraFocus() {
+    return { x: camera.x, y: camera.y, z: camera.z };
+}
+
+function workingNormal() {
+    if (Math.abs(Math.sin(camera.pitch)) > EDGE_ON) return UP;
+    const flat = Math.cos(camera.pitch);
+    return { x: flat * Math.cos(camera.yaw), y: flat * Math.sin(camera.yaw), z: Math.sin(camera.pitch) };
 }
 
 // Length of one screen pixel, measured at the point the camera looks at
@@ -1870,14 +1900,51 @@ function rotateView(dx, dy) {
     camera.pitch = clamp(camera.pitch + dy * 0.006, -MAX_PITCH, MAX_PITCH);
 }
 
-// Slide the view sideways, so the scene follows the mouse
-function panView(dx, dy) {
+/*
+ * Move the point the camera looks at: `side` to the right (as seen on
+ * screen), `ahead` away from the camera along the flat plane, and `lift` up.
+ *   right, along the plane = (-sin yaw, cos yaw)
+ *   ahead, along the plane = (-cos yaw, -sin yaw)   (the camera sits at +cos, +sin)
+ */
+function moveView(side, ahead, lift) {
+    camera.x += -side * Math.sin(camera.yaw) - ahead * Math.cos(camera.yaw);
+    camera.y += side * Math.cos(camera.yaw) - ahead * Math.sin(camera.yaw);
+    camera.z += lift;
+}
+
+// Slide the view along the plane like dragging a map: the scene follows the
+// mouse. Seen at a slant the plane looks squashed top to bottom, so up and
+// down drags move further (but not wildly far when nearly edge-on).
+function slideView(dx, dy) {
     const step = worldPerPixel();
-    const right = new THREE.Vector3().setFromMatrixColumn(view.matrixWorld, 0);
-    const up = new THREE.Vector3().setFromMatrixColumn(view.matrixWorld, 1);
-    camera.x += (-dx * right.x + dy * up.x) * step;
-    camera.y += (-dx * right.y + dy * up.y) * step;
-    camera.z += (-dx * right.z + dy * up.z) * step;
+    const slant = Math.sin(camera.pitch);
+    const squash = (slant < 0 ? -1 : 1) * Math.max(Math.abs(slant), 0.3);
+    moveView(-dx * step, dy * step / squash, 0);
+}
+
+/*
+ * Moving the view by holding down a key (W A S D, Q / Z) or a button on the
+ * canvas. `held` holds the moves in progress, and moveHeld() carries them out
+ * every frame, so the speed doesn't depend on the keyboard's repeat rate.
+ */
+const held = new Set();
+
+function moveHeld(elapsed) {
+    if (held.size === 0) return;
+    const seconds = elapsed / 1000;
+    const amount = (plus, minus) => (held.has(plus) ? 1 : 0) - (held.has(minus) ? 1 : 0);
+
+    const side = amount("right", "left");
+    const ahead = amount("forward", "back");
+    const lift = amount("up", "down");
+    if (side || ahead || lift) {
+        // Moving the view by hand stops it following anything
+        if (camera.follow !== "free") setCameraFollow("free");
+        const step = camera.distance * 0.8 * seconds; // crosses the view in about 1.5 seconds
+        moveView(side * step, ahead * step, lift * step);
+    }
+    camera.yaw += amount("turnLeft", "turnRight") * 1.2 * seconds;
+    zoomView(amount("zoomOut", "zoomIn") * 1.2 * seconds);
 }
 
 function zoomView(amount) {
@@ -2547,14 +2614,15 @@ function updatePredictedOrbit() {
     }
 }
 
-// ---------- Reference grid on the flat plane (z = 0) ----------
+// ---------- Reference grid on the working plane ----------
 
 /*
- * Faint squares on the middle plane, so you can tell how far above or below
- * it things are. New bodies are placed on this plane. The squares are a
- * power of 10 in size, picked to suit how far away the camera is, and the
- * lines fade out toward the edge. (Each line is split into short pieces,
- * because colours can only change from one end of a piece to the other.)
+ * Faint squares on the working plane (see section 4), so you can tell how
+ * far above or below it things are. New bodies are placed on this plane.
+ * The squares are a power of 10 in size, picked to suit how far away the
+ * camera is, and the lines fade out toward the edge. (Each line is split
+ * into short pieces, because colours can only change from one end of a
+ * piece to the other.)
  */
 const grid = (() => {
     const half = 20;   // lines from -20 to +20 squares
@@ -2587,56 +2655,116 @@ const grid = (() => {
 })();
 
 function updateGrid() {
-    grid.visible = options.grid && !options.field;
+    grid.visible = options.grid && options.field === "off";
     if (!grid.visible) return;
     const spacing = 10 ** Math.floor(Math.log10(camera.distance / 3));
     grid.scale.setScalar(spacing);
-    grid.position.set(Math.round(camera.x / spacing) * spacing, Math.round(camera.y / spacing) * spacing, 0);
+    grid.position.set(Math.round(camera.x / spacing) * spacing, Math.round(camera.y / spacing) * spacing, camera.z);
 }
 
-// ---------- Gravity well sheet ----------
+// ---------- Height lines ----------
 
 /*
- * Gravity field, shown as a stretched rubber sheet: for a grid of points on
- * the middle plane, add up the gravitational potential (G * M / r) from every
- * body, and push the sheet down by that much. Heavy bodies sit in deep
- * wells; a body rolling around a well is like a planet orbiting.
- *
- * Gravity has no edge: it reaches forever and just gets weaker. Depth uses a
- * logarithmic scale (each step down is a doubling of well depth), otherwise
- * the wells under stars would be far too deep to see anything else.
+ * A thin line from each body straight down (or up) to the working plane,
+ * like the radar in a space game: you can see at a glance which bodies are
+ * above the plane and which are below, and how far. Only for the bigger
+ * bodies (lines for thousands of galaxy stars would just be a blur).
  */
-const SHEET_CELLS = 64;
+const HEIGHT_LINE_LIMIT = 200;
+const heightLines = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+}));
+heightLines.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(HEIGHT_LINE_LIMIT * 6), 3));
+heightLines.geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(HEIGHT_LINE_LIMIT * 6), 3));
+heightLines.frustumCulled = false;
+scene.add(heightLines);
 
-const sheet = (() => {
+function updateHeightLines() {
+    heightLines.visible = options.grid;
+    if (!heightLines.visible) return;
+
+    const position = heightLines.geometry.attributes.position;
+    const color = heightLines.geometry.attributes.color;
+    let count = 0;
+    for (const b of bodies) {
+        if (count >= HEIGHT_LINE_LIMIT) break;
+        if (b !== selectedBody && (SMALL_TYPES.has(b.type) || isDot(b))) continue;
+        if (Math.abs(b.z - camera.z) < b.radius) continue; // already on the plane
+        const rgb = rgbFloats(visibleColor(b.color));
+        // Brighter at the body, fading toward the plane
+        position.setXYZ(count * 2, b.x, b.y, b.z);
+        color.setXYZ(count * 2, rgb[0] * 0.45, rgb[1] * 0.45, rgb[2] * 0.45);
+        position.setXYZ(count * 2 + 1, b.x, b.y, camera.z);
+        color.setXYZ(count * 2 + 1, rgb[0] * 0.12, rgb[1] * 0.12, rgb[2] * 0.12);
+        count++;
+    }
+    position.needsUpdate = true;
+    color.needsUpdate = true;
+    heightLines.geometry.setDrawRange(0, count * 2);
+}
+
+// ---------- Gravity field: contour map and rubber sheet ----------
+
+/*
+ * The gravity field, as a slice through space along the working plane: for
+ * a grid of points on the plane, add up the gravitational potential
+ * (G * M / r) from every body.
+ *
+ *   Contour map: bright = deep gravity well. The rings are lines of equal
+ *   potential ("equipotentials"); a body released at rest falls straight
+ *   across them, downhill. In 3D, every body is wrapped in nested shells of
+ *   equal potential, like the layers of an onion. Drawing all the shells
+ *   would hide everything, so we show a slice: around a single star, the
+ *   slice through its shells is a set of circles. Move the view up and down
+ *   (Q / Z) to slide the slice through the field.
+ *
+ *   Rubber sheet: the same picture, with each point pushed down by the depth
+ *   of the well. A body circling a funnel is like a planet orbiting.
+ *
+ * Gravity has no edge: it reaches forever and just gets weaker, so the
+ * picture fades out smoothly instead of stopping. Depth uses a logarithmic
+ * scale (each level is a doubling of well depth), otherwise the wells under
+ * stars would be far too deep to see anything else.
+ */
+const SHEET_CELLS = 64;     // squares across the sheet's shape
+const RINGS_PER_LEVEL = 2;  // equipotential rings per doubling of well depth
+
+function smoothstep(edge0, edge1, x) {
+    const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+}
+
+const field = (() => {
     const n = SHEET_CELLS + 1;
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
-    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
-
-    // Two triangles per square for the see-through surface...
+    // Where each corner sits on the picture (0 to 1 across, 0 to 1 up)
+    const uv = new Float32Array(n * n * 2);
+    // Two triangles per square for the surface, and the squares' edges for the sheet's lines
     const triangles = [];
-    // ...and the edges of the squares for the grid lines
     const edges = [];
     for (let row = 0; row < n; row++) {
         for (let col = 0; col < n; col++) {
             const k = row * n + col;
+            uv[k * 2] = col / (n - 1);
+            uv[k * 2 + 1] = row / (n - 1);
             if (col < n - 1) edges.push(k, k + 1);
             if (row < n - 1) edges.push(k, k + n);
             if (col < n - 1 && row < n - 1) triangles.push(k, k + 1, k + n, k + 1, k + n + 1, k + n);
         }
     }
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
     geometry.setIndex(triangles);
     const lineGeometry = new THREE.BufferGeometry();
     lineGeometry.setAttribute("position", geometry.getAttribute("position"));
-    lineGeometry.setAttribute("color", geometry.getAttribute("color"));
     lineGeometry.setIndex(edges);
 
+    const picture = document.createElement("canvas");
     const surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-        vertexColors: true, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false
+        transparent: true, side: THREE.DoubleSide, depthWrite: false
     }));
     const lines = new THREE.LineSegments(lineGeometry, new THREE.LineBasicMaterial({
-        vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false
+        color: 0x8b7cf6, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false
     }));
     surface.frustumCulled = lines.frustumCulled = false;
 
@@ -2644,67 +2772,159 @@ const sheet = (() => {
     group.add(surface, lines);
     group.visible = false;
     scene.add(group);
-    return { group, geometry, levels: new Float32Array(n * n), ready: false };
+    return {
+        group, geometry, surface, lines, picture,
+        context: picture.getContext("2d"),
+        image: null, texture: null,
+        levels: new Float32Array(0),
+        ready: false, mode: "off"
+    };
 })();
 
-function updateSheet() {
-    sheet.group.visible = options.field && bodies.length > 0;
-    if (!sheet.group.visible) {
-        sheet.ready = false;
+// The level at a point between grid points (blending the four around it)
+function fieldLevelAt(levels, points, gx, gy) {
+    const x0 = Math.min(Math.floor(gx), points - 2);
+    const y0 = Math.min(Math.floor(gy), points - 2);
+    const fx = gx - x0;
+    const fy = gy - y0;
+    const k = y0 * points + x0;
+    return (levels[k] * (1 - fx) + levels[k + 1] * fx) * (1 - fy) +
+        (levels[k + points] * (1 - fx) + levels[k + points + 1] * fx) * fy;
+}
+
+// Colour each point of the picture: glow for depth, plus soft equipotential rings
+function paintField(points) {
+    const levels = field.levels;
+
+    if (field.picture.width !== points) {
+        field.picture.width = field.picture.height = points;
+        field.image = field.context.createImageData(points, points);
+        // A new picture size needs a new texture on the graphics card
+        if (field.texture) field.texture.dispose();
+        field.texture = new THREE.CanvasTexture(field.picture);
+        field.texture.flipY = false;               // picture row 0 = the bottom (lowest y) of the plane
+        field.texture.generateMipmaps = false;
+        field.texture.minFilter = THREE.LinearFilter;
+        field.surface.material.map = field.texture;
+        field.surface.material.needsUpdate = true;
+    }
+    const data = field.image.data;
+
+    for (let row = 0; row < points; row++) {
+        for (let col = 0; col < points; col++) {
+            const k = row * points + col;
+            const level = levels[k];
+
+            // How fast the level changes from one point to the next
+            const left = levels[col > 0 ? k - 1 : k];
+            const right = levels[col < points - 1 ? k + 1 : k];
+            const down = levels[row > 0 ? k - points : k];
+            const up = levels[row < points - 1 ? k + points : k];
+            const ringsPerPoint = Math.hypot(right - left, up - down) / 2 * RINGS_PER_LEVEL + 1e-6;
+
+            // Distance to the nearest ring, measured in points, so every
+            // ring is drawn with the same soft width wherever it is
+            const ringPosition = level * RINGS_PER_LEVEL;
+            const fraction = ringPosition - Math.floor(ringPosition);
+            const distance = Math.min(fraction, 1 - fraction) / ringsPerPoint;
+
+            let line = clamp(1 - distance / 1.2, 0, 1);
+            // Fade out rings packed too tightly to see (e.g. right next to a star)
+            line *= smoothstep(2.5, 6, 1 / ringsPerPoint);
+            // Fade out the faint outermost rings
+            line *= smoothstep(3.2, 4, level) * 0.75;
+
+            const t = clamp((level - 3) / 8, 0, 1);
+
+            const i = k * 4;
+            data[i] = 40 + 160 * t * t + line * 90;
+            data[i + 1] = 25 + 70 * t * t * t + line * 90;
+            data[i + 2] = 90 + 160 * t + line * 70;
+            data[i + 3] = Math.min(255, 200 * t + line * 110);
+        }
+    }
+
+    field.context.putImageData(field.image, 0, 0);
+    field.texture.needsUpdate = true;
+}
+
+function updateField() {
+    const mode = options.field;
+    field.group.visible = mode !== "off" && bodies.length > 0;
+    if (!field.group.visible) {
+        field.ready = false;
         return;
     }
 
-    // Big systems use the Barnes-Hut tree here too (about 50 pulls per point
-    // instead of n), and only recalculate every third frame
-    const useTreeForField = bodies.length > FIELD_TREE_LIMIT;
-    if (useTreeForField && sheet.ready && frameCount % 3 !== 0) return;
+    // Big systems use the Barnes-Hut tree here too (about 60 pulls per point
+    // instead of n), and recalculate less often: the field changes slowly
+    const n = bodies.length;
+    const useTreeForField = n > FIELD_TREE_LIMIT;
+    const every = useTreeForField ? 3 : n > 20 ? 2 : 1;
+    if (field.ready && field.mode === mode && frameCount % every !== 0) return;
+    field.mode = mode;
     if (useTreeForField) buildTree(bodies);
 
-    const n = SHEET_CELLS + 1;
+    // Points across the picture: as many as possible while keeping the
+    // total work (points x pulls per point) about the same
+    const work = useTreeForField ? 60 : n;
+    const points = clamp(Math.floor(Math.sqrt(700000 / work)), SHEET_CELLS + 1, 193);
     const size = camera.distance * 2.2;
-    const cell = size / SHEET_CELLS;
-    // Snap to whole squares, so the grid doesn't slide around as the camera pans
-    const left = Math.round(camera.x / cell) * cell - size / 2;
-    const top = Math.round(camera.y / cell) * cell - size / 2;
+    const cell = size / (points - 1);
+    const planeZ = camera.z;
+    // Snap to whole sheet squares, so the picture doesn't shimmer as the camera pans
+    const snap = size / SHEET_CELLS;
+    const left = Math.round(camera.x / snap) * snap - size / 2;
+    const bottom = Math.round(camera.y / snap) * snap - size / 2;
     const eps2 = 15 * 15;
-    const levels = sheet.levels;
+
+    if (field.levels.length !== points * points) field.levels = new Float32Array(points * points);
+    const levels = field.levels;
     let lowest = Infinity;
 
-    for (let row = 0; row < n; row++) {
-        const wy = top + row * cell;
-        for (let col = 0; col < n; col++) {
+    for (let row = 0; row < points; row++) {
+        const wy = bottom + row * cell;
+        for (let col = 0; col < points; col++) {
             const wx = left + col * cell;
             let potential = 0;
             if (useTreeForField) {
                 // A rough tree setting is fine for a background picture
-                walkTree(wx, wy, 0, -1, 1.69, eps2);
+                walkTree(wx, wy, planeZ, -1, 1.69, eps2);
                 potential = -walkPhi / G;
             } else {
-                for (const b of bodies) {
+                for (let j = 0; j < n; j++) {
+                    const b = bodies[j];
                     const dx = wx - b.x;
                     const dy = wy - b.y;
-                    potential += b.mass / Math.sqrt(dx * dx + dy * dy + b.z * b.z + eps2);
+                    const dz = planeZ - b.z;
+                    potential += b.mass / Math.sqrt(dx * dx + dy * dy + dz * dz + eps2);
                 }
             }
             const level = Math.log2(1 + G * potential);
-            levels[row * n + col] = level;
+            levels[row * points + col] = level;
             if (level < lowest) lowest = level;
         }
     }
 
-    const position = sheet.geometry.attributes.position;
-    const color = sheet.geometry.attributes.color;
-    const depthPerLevel = size * 0.025;
-    for (let k = 0; k < n * n; k++) {
-        const level = levels[k];
-        position.setXYZ(k, left + (k % n) * cell, top + Math.floor(k / n) * cell, -(level - lowest) * depthPerLevel);
-        // Deeper = brighter: purple at the edges to pink-white in the wells
-        const t = clamp((level - 3) / 8, 0, 1);
-        color.setXYZ(k, (60 + 180 * t * t) / 255, (70 + 90 * t * t * t) / 255, (150 + 105 * t) / 255);
+    paintField(points);
+
+    // Shape the surface: flat for the contour map, pushed down for the sheet
+    const corners = SHEET_CELLS + 1;
+    const position = field.geometry.attributes.position;
+    const depthPerLevel = mode === "sheet" ? size * 0.025 : 0;
+    const scale = (points - 1) / SHEET_CELLS; // grid points per sheet square
+    for (let row = 0; row < corners; row++) {
+        for (let col = 0; col < corners; col++) {
+            const level = fieldLevelAt(levels, points, col * scale, row * scale);
+            position.setXYZ(row * corners + col,
+                left + col * size / SHEET_CELLS,
+                bottom + row * size / SHEET_CELLS,
+                planeZ - (level - lowest) * depthPerLevel);
+        }
     }
     position.needsUpdate = true;
-    color.needsUpdate = true;
-    sheet.ready = true;
+    field.lines.visible = mode === "sheet";
+    field.ready = true;
 }
 
 // ---------- Barnes-Hut tree view ----------
@@ -2814,7 +3034,7 @@ function placementVelocity(p) {
     return {
         vx: (p.current.x - p.start.x) * LAUNCH_SCALE,
         vy: (p.current.y - p.start.y) * LAUNCH_SCALE,
-        vz: 0,
+        vz: (p.current.z - p.start.z) * LAUNCH_SCALE,
         auto: false
     };
 }
@@ -3113,7 +3333,8 @@ function render() {
     updateTrails();
     updatePredictedOrbit();
     updateGrid();
-    updateSheet();
+    updateHeightLines();
+    updateField();
     updateTreeOverlay();
     updatePlacement();
 
@@ -3382,6 +3603,8 @@ function refreshLiveReadouts(force = false) {
         " · " + bodies.length.toLocaleString() + " bodies · " + integratorName +
         " · " + solverName +
         " · " + simulationSpeed.toFixed(1) + "x" + slowText;
+
+    document.getElementById("planeHeight").textContent = "z " + Math.round(camera.z);
 
     refreshSolverStats();
     refreshEquations();
@@ -3719,9 +3942,9 @@ function updateHint() {
     const hint = document.getElementById("canvasHint");
     if (brush) {
         hint.innerHTML =
-            "<b>Drag</b> to throw a " + BODY_TYPES[brush].label.toLowerCase() + " &middot; " +
+            "<b>Drag</b> on the grid to throw a " + BODY_TYPES[brush].label.toLowerCase() + " &middot; " +
             "<b>Click</b> for an automatic orbit &middot; " +
-            "<b>Right-drag</b> to pan &middot; " +
+            "<b>Q / Z</b> raise or lower the grid &middot; " +
             "<b>Esc</b> to stop placing";
     } else if (tool === "move") {
         hint.innerHTML =
@@ -3731,9 +3954,9 @@ function updateHint() {
     } else {
         hint.innerHTML =
             "<b>Drag</b> to rotate &middot; " +
-            "<b>Right-drag</b> to pan &middot; " +
-            "<b>Scroll</b> to zoom &middot; " +
-            "<b>Click</b> a body to inspect it";
+            "<b>Right-drag</b> or <b>W A S D</b> to slide &middot; " +
+            "<b>Q / Z</b> up and down &middot; " +
+            "<b>Scroll</b> to zoom";
     }
 }
 
@@ -3869,15 +4092,19 @@ canvas.addEventListener("pointerdown", event => {
         const hit = bodyAtScreen(screen.x, screen.y);
         if (hit && tool === "move") {
             selectBody(hit);
-            pointer = { mode: "drag", body: hit, startScreen: screen, lastScreen: screen, moved: false, resume: false };
+            pointer = {
+                mode: "drag", body: hit, normal: workingNormal(),
+                startScreen: screen, lastScreen: screen, moved: false, resume: false
+            };
         } else if (hit && brush) {
             selectBody(hit);
             return;
         } else if (brush) {
-            // New bodies go on the flat middle plane (where the grid is)
-            const start = screenToPlane(screen.x, screen.y);
+            // New bodies go on the working plane (where the grid is)
+            const normal = workingNormal();
+            const start = screenToPlane(screen.x, screen.y, cameraFocus(), normal);
             if (!start) return;
-            pointer = { mode: "place", start, current: start, startScreen: screen, currentScreen: screen };
+            pointer = { mode: "place", start, current: start, normal, startScreen: screen, currentScreen: screen };
         } else {
             pointer = { mode: "rotate", startScreen: screen, lastScreen: screen, moved: false, clicked: hit };
         }
@@ -3896,7 +4123,8 @@ canvas.addEventListener("pointermove", event => {
         if (touches.size < 2) return;
         const now = measurePinch();
         zoomView(Math.log(pinch.distance / Math.max(now.distance, 1)));
-        panView(now.middle.x - pinch.middle.x, now.middle.y - pinch.middle.y);
+        if (camera.follow !== "free") setCameraFollow("free");
+        slideView(now.middle.x - pinch.middle.x, now.middle.y - pinch.middle.y);
         pinch = now;
         return;
     }
@@ -3908,7 +4136,7 @@ canvas.addEventListener("pointermove", event => {
 
     if (pointer.mode === "place") {
         pointer.currentScreen = screen;
-        pointer.current = screenToPlane(screen.x, screen.y) ?? pointer.current;
+        pointer.current = screenToPlane(screen.x, screen.y, pointer.start, pointer.normal) ?? pointer.current;
         return;
     }
 
@@ -3932,7 +4160,7 @@ canvas.addEventListener("pointermove", event => {
     const dy = screen.y - pointer.lastScreen.y;
 
     if (pointer.mode === "pan") {
-        panView(dx, dy);
+        slideView(dx, dy);
     } else if (pointer.mode === "rotate") {
         rotateView(dx, dy);
     } else if (pointer.mode === "drag" && bodies.includes(pointer.body)) {
@@ -3943,12 +4171,12 @@ canvas.addEventListener("pointermove", event => {
             const step = p ? 1 / p.scale : worldPerPixel();
             moveBody(body, body.x, body.y, body.z - dy * step);
         } else {
-            // Slide across the flat plane at the body's height, following the mouse.
-            // Moving by the change in mouse position (not jumping to it) also
-            // works while the camera follows the body.
-            const from = screenToPlane(pointer.lastScreen.x, pointer.lastScreen.y, body.z);
-            const to = screenToPlane(screen.x, screen.y, body.z);
-            if (from && to) moveBody(body, body.x + to.x - from.x, body.y + to.y - from.y, body.z);
+            // Slide parallel to the working plane, through the body, following
+            // the mouse. Moving by the change in mouse position (not jumping
+            // to it) also works while the camera follows the body.
+            const from = screenToPlane(pointer.lastScreen.x, pointer.lastScreen.y, body, pointer.normal);
+            const to = screenToPlane(screen.x, screen.y, body, pointer.normal);
+            if (from && to) moveBody(body, body.x + to.x - from.x, body.y + to.y - from.y, body.z + to.z - from.z);
         }
     }
     pointer.lastScreen = screen;
@@ -4066,7 +4294,6 @@ const toggles = {
     trailToggle: "trails",
     vectorToggle: "vectors",
     orbitToggle: "orbit",
-    fieldToggle: "field",
     gridToggle: "grid",
     spinToggle: "spinView",
     mergeToggle: "merge",
@@ -4097,6 +4324,11 @@ function toggleTopView() {
 }
 
 document.getElementById("topViewBtn").onclick = toggleTopView;
+
+document.getElementById("fieldSelect").onchange = event => {
+    options.field = event.target.value;
+    event.target.blur();
+};
 
 // ---------- Mass, radius and velocity editing ----------
 
@@ -4238,11 +4470,52 @@ document.addEventListener("click", event => {
 
 // ---------- Keyboard shortcuts ----------
 
+const MOVE_KEYS = { w: "forward", a: "left", s: "back", d: "right", q: "up", z: "down" };
+
+window.addEventListener("keyup", event => {
+    const move = MOVE_KEYS[event.key.toLowerCase()];
+    if (move) held.delete(move);
+});
+
+// Switching to another window: let go of every held key
+window.addEventListener("blur", () => held.clear());
+
+// The buttons on the canvas: hold one down to keep moving
+document.querySelectorAll("#navPad button[data-move]").forEach(btn => {
+    const move = btn.dataset.move;
+    const stop = () => {
+        held.delete(move);
+        btn.classList.remove("held");
+    };
+    btn.addEventListener("pointerdown", event => {
+        held.add(move);
+        btn.classList.add("held");
+        try {
+            btn.setPointerCapture(event.pointerId);
+        } catch (error) {
+            // already gone
+        }
+    });
+    btn.addEventListener("pointerup", stop);
+    btn.addEventListener("pointercancel", stop);
+    btn.addEventListener("lostpointercapture", stop);
+});
+
+document.getElementById("navFit").onclick = () => fitView();
+
 window.addEventListener("keydown", event => {
     const target = event.target;
     const typing = target.tagName === "SELECT" ||
         (target.tagName === "INPUT" && (target.type === "number" || target.type === "range"));
     if (typing) return;
+
+    // W A S D slide the view, Q / Z move it up and down, for as long as they're held
+    const move = MOVE_KEYS[event.key.toLowerCase()];
+    if (move && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        held.add(move);
+        return;
+    }
 
     // Arrow keys turn the view (handy while placing bodies, when dragging throws them)
     const turn = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[event.key];
@@ -4321,6 +4594,8 @@ function frame(now) {
             recordEnergy();
         }
     }
+
+    moveHeld(elapsed);
 
     // "Slowly turn the view": the camera drifts round, for showing off
     if (options.spinView && !pointer) camera.yaw += elapsed * 0.00006;
