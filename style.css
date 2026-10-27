@@ -531,6 +531,10 @@ kbd {
     color: #4ade80;
 }
 
+.solver-stats .warning {
+    color: #facc15;
+}
+
 .body-item.more {
     cursor: default;
     color: var(--muted);
