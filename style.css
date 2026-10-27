@@ -281,6 +281,9 @@ kbd {
 .swatch.star { background: #fbbf24; box-shadow: 0 0 6px #fbbf24; }
 .swatch.moon { background: #cbd5e1; width: 8px; height: 8px; }
 .swatch.blackhole { background: #000; box-shadow: 0 0 0 2px #f97316; }
+.swatch.asteroid { background: #9ca3af; width: 9px; height: 9px; border-radius: 35% 50% 40% 55%; }
+.swatch.comet { background: #bae6fd; box-shadow: -5px 2px 6px #7dd3fc; width: 8px; height: 8px; }
+.swatch.neutronstar { background: #ede9fe; box-shadow: 0 0 6px #a78bfa; width: 7px; height: 7px; }
 
 /* ---------- Side panel ---------- */
 
@@ -291,6 +294,34 @@ kbd {
     padding: 4px 18px;
     max-height: calc(72vh + 110px);
     overflow-y: auto;
+}
+
+/* Tabs at the top of the side panel */
+.panel-tabs {
+    position: sticky;
+    top: -4px;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin: 0 -18px;
+    padding: 12px 18px 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+}
+
+.panel-tab.active {
+    border-color: var(--accent);
+    background: rgba(37, 99, 235, 0.22);
+}
+
+.link-button {
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+    background: transparent;
+    border-style: dashed;
+    color: var(--accent);
 }
 
 .panel-section {
@@ -527,6 +558,100 @@ kbd {
 
 .hidden {
     display: none !important;
+}
+
+/* ---------- Equations tab ---------- */
+
+.eq-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 10px 12px;
+    margin: 10px 0;
+}
+
+.eq-card h3 {
+    font-size: 13px;
+    color: var(--accent);
+    margin-bottom: 6px;
+}
+
+/* The equation itself, in maths-style lettering */
+.eq {
+    margin: 6px 0;
+    font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+    font-size: 17px;
+    color: #fde68a;
+}
+
+/* A fraction: top over bottom with a line between */
+.frac {
+    display: inline-flex;
+    flex-direction: column;
+    vertical-align: middle;
+    text-align: center;
+    line-height: 1.25;
+    margin: 0 2px;
+}
+
+.frac > span + span {
+    border-top: 1px solid currentColor;
+}
+
+/* The same equation with this moment's numbers put in */
+.eq-sub {
+    margin: 4px 0;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.eq-sub .frac {
+    font-size: 12px;
+}
+
+.eq-sub b,
+.eq-row b {
+    color: #fff;
+    font-weight: 600;
+}
+
+.eq-sub b.result {
+    color: #4ade80;
+}
+
+.eq-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+    margin: 3px 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.eq-row span:first-child {
+    color: var(--muted);
+}
+
+.eq-note {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 6px;
+}
+
+.orbit-status {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(74, 222, 128, 0.15);
+    color: #4ade80;
+}
+
+.orbit-status.escaping {
+    background: rgba(248, 113, 113, 0.15);
+    color: #f87171;
 }
 
 /* ---------- Explainer ---------- */

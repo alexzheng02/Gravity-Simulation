@@ -42,6 +42,10 @@ const BODY_TYPES = {
     star:      { label: "Star",       mass: 10000, radius: 22, color: "#fbbf24" },
     moon:      { label: "Moon",       mass: 1,     radius: 4,  color: "#cbd5e1" },
     blackhole: { label: "Black Hole", mass: 40000, radius: 10, color: "#111111" },
+    asteroid:  { label: "Asteroid",   mass: 0.3,   radius: 3,  color: "#9ca3af" },
+    comet:     { label: "Comet",      mass: 0.2,   radius: 3,  color: "#bae6fd" },
+    // The collapsed core of a giant star: a star's mass in a tiny ball
+    neutronstar: { label: "Neutron Star", mass: 20000, radius: 5, color: "#c4b5fd" },
     rock:      { label: "Rock",       mass: 0.1,   radius: 1.2, color: "#a8a29e" },
     // Stars inside a galaxy. Each one stands for a whole crowd of real stars.
     // Real stars are so far apart that they practically never hit anything,
@@ -50,7 +54,10 @@ const BODY_TYPES = {
 };
 
 // Small, numerous body types that get simplified drawing in big systems
-const SMALL_TYPES = new Set(["moon", "rock", "galaxyStar"]);
+const SMALL_TYPES = new Set(["moon", "rock", "asteroid", "galaxyStar"]);
+
+// Body types you can place, in the order of their number keys (1 to 7)
+const BRUSH_KEYS = ["planet", "star", "moon", "blackhole", "asteroid", "comet", "neutronstar"];
 
 const PLANET_COLORS = [
     "#38bdf8", "#a78bfa", "#34d399", "#f472b6",
@@ -84,6 +91,7 @@ const options = {
     autoPause: false,
     trails: true,
     vectors: false,
+    orbit: true,
     field: false,
     tree: false,
     merge: true,
@@ -103,6 +111,11 @@ const editState = {
     pausedByEdit: false
 };
 
+// The body the selected body is compared with: what it orbits in the
+// Equations tab, the predicted ellipse and "Make it orbit".
+// null = automatic (whichever body pulls on it hardest).
+let referenceId = null;
+
 // Energy tracking
 let energyHistory = [];
 let energyBaseline = null;
@@ -118,7 +131,8 @@ let viewWidth = 0;
 let viewHeight = 0;
 let pixelRatio = 1;
 
-const camera = { x: 0, y: 0, zoom: 1, follow: "free" };
+// follow: "free", "com" (centre of mass), "selected", or "body" (follow `target`)
+const camera = { x: 0, y: 0, zoom: 1, follow: "free", target: null };
 
 let brush = null;       // null = Select / Pan tool; otherwise the body type being placed
 let pointer = null;     // what the mouse is currently doing (placing or panning)
@@ -136,7 +150,7 @@ let lastFieldCell = 4;
    2. PHYSICS
    ========================================================================== */
 
-function createBody({ type, name, x, y, vx = 0, vy = 0, mass, radius, color }) {
+function createBody({ type, name, x, y, vx = 0, vy = 0, mass, radius, color, collisionless }) {
     const preset = BODY_TYPES[type];
     typeCounters[type] = (typeCounters[type] || 0) + 1;
 
@@ -147,6 +161,8 @@ function createBody({ type, name, x, y, vx = 0, vy = 0, mass, radius, color }) {
         x, y, vx, vy,
         ax: 0, ay: 0, phi: 0,
         dead: false,
+        // Passes through everything (galaxy stars, and the asteroid belt's asteroids)
+        collisionless: collisionless ?? preset.collisionless ?? false,
         mass: mass ?? preset.mass,
         radius: radius ?? preset.radius,
         color: color ?? preset.color ??
@@ -745,9 +761,9 @@ function physicsStep() {
  * sort the bodies left to right, then each body only checks the bodies to
  * its right that are close enough horizontally to possibly touch it.
  */
-// Collisionless bodies (galaxy stars) never collide with anything
+// Collisionless bodies (galaxy stars, belt asteroids) never collide with anything
 function canCollide(a, b) {
-    return !BODY_TYPES[a.type].collisionless && !BODY_TYPES[b.type].collisionless;
+    return !a.collisionless && !b.collisionless;
 }
 
 let sweepOrder = new Int32Array(0);
@@ -830,6 +846,8 @@ function mergeBodies(a, b) {
 
     small.dead = true;
     if (selectedBody === small) selectedBody = big;
+    if (camera.target === small) camera.target = big;
+    if (referenceId === small.id) referenceId = big.id;
     return { energyChange, notable };
 }
 
@@ -999,9 +1017,10 @@ function dominantAttractor(x, y, exclude) {
  * Velocity for a circular orbit around `attractor`.
  * Circular motion needs  v^2 / r = gravity, so v = sqrt(G (M + m) / r).
  * (The extra factors account for softening so the orbit is truly circular.)
- * The direction is perpendicular to the line joining the two bodies.
+ * The direction is perpendicular to the line joining the two bodies:
+ * direction = 1 goes anticlockwise on screen, -1 clockwise.
  */
-function circularVelocity(x, y, mass, attractor) {
+function circularVelocity(x, y, mass, attractor, direction = 1) {
     const dx = x - attractor.x;
     const dy = y - attractor.y;
     const r = Math.hypot(dx, dy);
@@ -1014,9 +1033,67 @@ function circularVelocity(x, y, mass, attractor) {
     );
 
     return {
-        vx: attractor.vx + speed * dy / r,
-        vy: attractor.vy - speed * dx / r
+        vx: attractor.vx + direction * speed * dy / r,
+        vy: attractor.vy - direction * speed * dx / r
     };
+}
+
+// The body `body` is compared with: the one picked in the menu, or else
+// whichever pulls on it hardest
+function referenceBody(body) {
+    if (referenceId !== null && referenceId !== body.id) {
+        const chosen = bodies.find(b => b.id === referenceId);
+        if (chosen) return chosen;
+    }
+    return dominantAttractor(body.x, body.y, body);
+}
+
+/*
+ * KEPLER ORBIT
+ *
+ * Pretend `body` and `other` are alone in the universe (the "two-body
+ * problem"). Then there's an exact answer: `body` moves on an ellipse with
+ * `other` at one focus (if it's bound), or flies off forever (if not).
+ *
+ *   mu = G (M + m)
+ *   energy per unit mass   E = v^2 / 2 - mu / r       (negative = bound)
+ *   semi-major axis        a = -mu / (2E)             (half the ellipse's length)
+ *   period                 T = 2 pi sqrt(a^3 / mu)    (Kepler's 3rd law)
+ *   eccentricity vector    e = ((v^2 - mu/r) r - (r . v) v) / mu
+ *     its length is how stretched the ellipse is (0 = circle, near 1 = very
+ *     long), and it points from `other` to the closest point of the orbit.
+ *
+ * r and v are measured relative to `other`. This uses plain r, not the
+ * softened r^2 + eps^2, because that's the textbook formula; far from the
+ * other body (r much bigger than eps) the difference is tiny.
+ */
+function orbitAround(body, other) {
+    const mu = G * (body.mass + other.mass);
+    const rx = body.x - other.x;
+    const ry = body.y - other.y;
+    const vx = body.vx - other.vx;
+    const vy = body.vy - other.vy;
+    const r = Math.hypot(rx, ry);
+    const v = Math.hypot(vx, vy);
+
+    const energy = v * v / 2 - mu / r;
+    const orbit = {
+        mu, r, v,
+        energy,
+        circularSpeed: Math.sqrt(mu / r),
+        escapeSpeed: Math.sqrt(2 * mu / r),
+        bound: energy < 0
+    };
+
+    if (orbit.bound) {
+        orbit.a = -mu / (2 * energy);
+        orbit.period = 2 * Math.PI * Math.sqrt(orbit.a ** 3 / mu);
+        const rDotV = rx * vx + ry * vy;
+        orbit.ex = ((v * v - mu / r) * rx - rDotV * vx) / mu;
+        orbit.ey = ((v * v - mu / r) * ry - rDotV * vy) / mu;
+        orbit.e = Math.hypot(orbit.ex, orbit.ey);
+    }
+    return orbit;
 }
 
 /*
@@ -1436,6 +1513,62 @@ const SCENARIOS = {
         }
     },
 
+    asteroidBelt: {
+        fit: 540,
+        note: "A belt of asteroids between the inner planets and a giant, plus a comet on a long, stretched orbit. Watch the comet speed up as it dives past the star (Kepler's 2nd law) while its tail grows and points away from the star. Select the comet and open the Equations tab.",
+        build() {
+            const sun = addBody({ type: "star", name: "Sol", x: 0, y: 0 });
+            addOrbiting("planet", sun, 75, 120, { name: "Cinder", mass: 3, radius: 5, color: "#fb923c" });
+            addOrbiting("planet", sun, 120, 300, { name: "Azure", mass: 8, radius: 8, color: "#38bdf8" });
+            addOrbiting("planet", sun, 165, 60, { name: "Rosa", mass: 6, radius: 7, color: "#f472b6" });
+
+            /*
+             * The belt sits well inside the giant's orbit. A giant planet
+             * scatters everything in a "chaotic zone" around its orbit,
+             * about 1.3 * (m / M)^(2/7) * r wide on each side (Wisdom 1980),
+             * which here starts at ~307, safely outside the belt. Real belt asteroids are
+             * around a million km apart and almost never hit anything, but
+             * squashed into a thin ring on screen, half of them would merge
+             * in one orbit. So, like galaxy stars, these pass through
+             * everything. (Asteroids you place yourself do collide.)
+             */
+            const random = seededRandom(5);
+            const asteroidColors = ["#9ca3af", "#a8a29e", "#78716c", "#b8a48c"];
+            for (let i = 0; i < 180; i++) {
+                addOrbiting("asteroid", sun, 215 + random() * 50, random() * 360, {
+                    name: "Asteroid " + (i + 1),
+                    // Very light, like real asteroids (the whole real belt
+                    // weighs 3% of our Moon). Heavier ones would tug each
+                    // other onto messy orbits as they slowly drift past.
+                    mass: 0.001 + random() * 0.01,
+                    radius: 1.2 + random() * 1.6,
+                    color: asteroidColors[i % asteroidColors.length],
+                    collisionless: true
+                });
+            }
+
+            // A comet crosses every planet's path twice per lap, so sooner or
+            // later it hits one. These starting angles were picked by testing:
+            // the comet survives 20+ laps (over 3 minutes at 1x).
+            addOrbiting("planet", sun, 420, 20, { name: "Goliath", mass: 40, radius: 11, color: "#e7c59a" });
+
+            /*
+             * The comet starts at its farthest point (aphelion), 520 from
+             * the star, on an ellipse that comes within 55 of it.
+             * Speed there, from the "vis-viva" equation:
+             *   v = sqrt(G M (2 / r - 1 / a)),  a = (520 + 55) / 2
+             * M is everything inside its path (star, planets and belt), which
+             * pulls roughly like one mass at the centre.
+             */
+            const farthest = 520;
+            const closest = 55;
+            const a = (farthest + closest) / 2;
+            const inside = bodies.reduce((total, b) => total + b.mass, 0);
+            const speed = Math.sqrt(G * inside * (2 / farthest - 1 / a));
+            addBody({ type: "comet", name: "Comet Halley", x: -farthest, y: 0, vx: 0, vy: speed });
+        }
+    },
+
     empty: {
         fit: 300,
         note: "Empty space. Pick a body type below the canvas and start throwing things.",
@@ -1464,6 +1597,8 @@ function loadScenario(name) {
     editState.pausedByEdit = false;
     speedRatio = 1;
     bodyListDirty = false;
+    referenceId = null;
+    if (camera.follow === "body") setCameraFollow("free");
     timeStep = scenario.timeStep ?? DEFAULT_TIME_STEP;
     softening = scenario.softening ?? DEFAULT_SOFTENING;
 
@@ -1557,6 +1692,14 @@ function updateCameraFollow() {
     } else if (camera.follow === "selected" && selectedBody) {
         camera.x = selectedBody.x;
         camera.y = selectedBody.y;
+    } else if (camera.follow === "body") {
+        // The followed body was deleted: stop following
+        if (!camera.target || !bodies.includes(camera.target)) {
+            setCameraFollow("free");
+            return;
+        }
+        camera.x = camera.target.x;
+        camera.y = camera.target.y;
     }
 }
 
@@ -1857,7 +2000,8 @@ function drawDots(list, glow = false) {
 // `lightSources` is the list of stars, collected once per frame in render().
 let lightSources = [];
 
-function lightDirection(body) {
+// The star that shines brightest on `body` (null if there are no stars)
+function brightestStar(body) {
     let best = null;
     let bestValue = 0;
 
@@ -1870,12 +2014,151 @@ function lightDirection(body) {
             best = b;
         }
     }
+    return best;
+}
 
+function lightDirection(body) {
+    const best = brightestStar(body);
     if (!best) return { x: -0.6, y: -0.6 };
     const dx = best.x - body.x;
     const dy = best.y - body.y;
     const len = Math.hypot(dx, dy) || 1;
     return { x: dx / len, y: dy / len };
+}
+
+// Planet-style shading: bright on the side facing the star, dark behind
+function shadedFill(b, r) {
+    const light = lightDirection(b);
+    const shade = ctx.createRadialGradient(
+        b.x + light.x * r * 0.45, b.y + light.y * r * 0.45, r * 0.05,
+        b.x, b.y, r * 1.1
+    );
+    shade.addColorStop(0, mixColor(b.color, WHITE, 0.45));
+    shade.addColorStop(0.5, b.color);
+    shade.addColorStop(1, mixColor(b.color, BLACK, 0.75));
+    return shade;
+}
+
+// A lumpy rock: a circle with a bumpy edge. The bumps come from a random
+// generator seeded with the body's id, so each asteroid keeps its own shape
+// every frame. It tumbles slowly as time passes.
+function drawAsteroid(b) {
+    const random = seededRandom(b.id || 1);
+    const tumble = simTime * (random() - 0.5) * 0.06;
+    const corners = 9;
+
+    ctx.beginPath();
+    for (let i = 0; i < corners; i++) {
+        const angle = tumble + i / corners * Math.PI * 2;
+        const bump = b.radius * (0.75 + random() * 0.4);
+        ctx.lineTo(b.x + bump * Math.cos(angle), b.y + bump * Math.sin(angle));
+    }
+    ctx.closePath();
+    ctx.fillStyle = shadedFill(b, b.radius);
+    ctx.fill();
+}
+
+// One comet tail: a fading wedge from the comet in direction (ux, uy)
+function drawTail(b, ux, uy, length, width, color) {
+    const tx = b.x + ux * length;
+    const ty = b.y + uy * length;
+    const fade = ctx.createLinearGradient(b.x, b.y, tx, ty);
+    fade.addColorStop(0, rgba(color, 0.75));
+    fade.addColorStop(1, rgba(color, 0));
+
+    // (-uy, ux) is sideways to the tail
+    ctx.fillStyle = fade;
+    ctx.beginPath();
+    ctx.moveTo(b.x - uy * width * 0.5, b.y + ux * width * 0.5);
+    ctx.lineTo(tx - uy * width * 2.5, ty + ux * width * 2.5);
+    ctx.lineTo(tx + uy * width * 2.5, ty - ux * width * 2.5);
+    ctx.lineTo(b.x + uy * width * 0.5, b.y - ux * width * 0.5);
+    ctx.closePath();
+    ctx.fill();
+}
+
+/*
+ * A comet's tail points AWAY from the star, not behind the comet:
+ * starlight and the stellar wind push its gas and dust outward.
+ * The closer (hotter) the comet, the more ice boils off: longer tail.
+ *   - Gas (ion) tail: blue, straight away from the star
+ *   - Dust tail: yellowish, bends back along the path a little, because
+ *     heavier dust is pushed less and lags behind
+ * Far from any star the comet is frozen and has no tail.
+ */
+function drawComet(b) {
+    const { x, y, radius: r } = b;
+    const star = brightestStar(b);
+
+    if (star) {
+        const dx = x - star.x;
+        const dy = y - star.y;
+        const distance = Math.hypot(dx, dy) || 1;
+        const length = Math.min(260, 6000 * (star.mass / 10000) / distance);
+
+        if (length > r) {
+            const ux = dx / distance;
+            const uy = dy / distance;
+            const speed = Math.hypot(b.vx - star.vx, b.vy - star.vy) || 1;
+            let dustX = ux - 0.5 * (b.vx - star.vx) / speed;
+            let dustY = uy - 0.5 * (b.vy - star.vy) / speed;
+            const dustLength = Math.hypot(dustX, dustY) || 1;
+            dustX /= dustLength;
+            dustY /= dustLength;
+
+            ctx.globalCompositeOperation = "lighter";
+            drawTail(b, dustX, dustY, length * 0.8, Math.max(r, length * 0.09), "#fde68a");
+            drawTail(b, ux, uy, length, Math.max(r * 0.7, length * 0.05), "#7dd3fc");
+            ctx.globalCompositeOperation = "source-over";
+        }
+    }
+
+    // Glowing cloud of gas (the coma) around a small icy core
+    const coma = ctx.createRadialGradient(x, y, 0, x, y, r * 2.5);
+    coma.addColorStop(0, "rgba(255,255,255,0.95)");
+    coma.addColorStop(0.3, rgba(b.color, 0.6));
+    coma.addColorStop(1, rgba(b.color, 0));
+    ctx.fillStyle = coma;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 2.5, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+// A pulsar: a tiny, hot core sweeping two beams around like a lighthouse
+function drawNeutronStar(b) {
+    const { x, y, radius: r } = b;
+
+    const glow = ctx.createRadialGradient(x, y, r * 0.3, x, y, r * 3.5);
+    glow.addColorStop(0, rgba(b.color, 0.8));
+    glow.addColorStop(1, rgba(b.color, 0));
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 3.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    const angle = simTime * 0.7 + b.id;
+    const beamLength = r * 9;
+    ctx.globalCompositeOperation = "lighter";
+    for (const side of [1, -1]) {
+        const ux = side * Math.cos(angle);
+        const uy = side * Math.sin(angle);
+        const beam = ctx.createLinearGradient(x, y, x + ux * beamLength, y + uy * beamLength);
+        beam.addColorStop(0, "rgba(237,233,254,0.8)");
+        beam.addColorStop(1, "rgba(167,139,250,0)");
+        ctx.fillStyle = beam;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + ux * beamLength - uy * r * 1.2, y + uy * beamLength + ux * r * 1.2);
+        ctx.lineTo(x + ux * beamLength + uy * r * 1.2, y + uy * beamLength - ux * r * 1.2);
+        ctx.closePath();
+        ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+
+    ctx.fillStyle = "#f5f3ff";
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
 }
 
 function drawBody(b) {
@@ -1928,16 +2211,17 @@ function drawBody(b) {
         ctx.arc(x, y, r * 1.08, 0, Math.PI * 2);
         ctx.stroke();
 
+    } else if (b.type === "asteroid") {
+        drawAsteroid(b);
+
+    } else if (b.type === "comet") {
+        drawComet(b);
+
+    } else if (b.type === "neutronstar") {
+        drawNeutronStar(b);
+
     } else {
-        const light = lightDirection(b);
-        const shade = ctx.createRadialGradient(
-            x + light.x * r * 0.45, y + light.y * r * 0.45, r * 0.05,
-            x, y, r * 1.1
-        );
-        shade.addColorStop(0, mixColor(b.color, WHITE, 0.45));
-        shade.addColorStop(0.5, b.color);
-        shade.addColorStop(1, mixColor(b.color, BLACK, 0.75));
-        ctx.fillStyle = shade;
+        ctx.fillStyle = shadedFill(b, r);
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
         ctx.fill();
@@ -2017,6 +2301,47 @@ function drawVectors() {
                 b.x + b.ax / accel * (start + length), b.y + b.ay / accel * (start + length),
                 "#fb923c", 2
             );
+        }
+    }
+}
+
+/*
+ * The ellipse Kepler's laws predict for the selected body (see orbitAround).
+ * The ellipse's centre is a distance a * e from the focus (the other body),
+ * on the opposite side from the closest point.
+ */
+function drawPredictedOrbit() {
+    const b = selectedBody;
+    if (!b || !bodies.includes(b)) return;
+    const other = referenceBody(b);
+    if (!other) return;
+
+    const orbit = orbitAround(b, other);
+    if (!orbit.bound || orbit.e >= 0.999 || orbit.a > 1e6) return;
+
+    const centerX = other.x - orbit.a * orbit.ex;
+    const centerY = other.y - orbit.a * orbit.ey;
+    const semiMinor = orbit.a * Math.sqrt(1 - orbit.e * orbit.e);
+    const tilt = Math.atan2(orbit.ey, orbit.ex);
+
+    ctx.strokeStyle = rgba(b.color === "#111111" ? "#f97316" : b.color, 0.55);
+    ctx.lineWidth = 1.5 / camera.zoom;
+    ctx.setLineDash([8 / camera.zoom, 6 / camera.zoom]);
+    ctx.beginPath();
+    ctx.ellipse(centerX, centerY, orbit.a, semiMinor, tilt, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Mark the closest and farthest points
+    if (orbit.e > 0.02) {
+        const ux = orbit.ex / orbit.e;
+        const uy = orbit.ey / orbit.e;
+        const size = 3 / camera.zoom;
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        for (const distance of [orbit.a * (1 - orbit.e), -orbit.a * (1 + orbit.e)]) {
+            ctx.beginPath();
+            ctx.arc(other.x + ux * distance, other.y + uy * distance, size, 0, Math.PI * 2);
+            ctx.fill();
         }
     }
 }
@@ -2113,7 +2438,10 @@ function drawPlacement() {
 
     // Ghost of the body
     ctx.globalAlpha = 0.6;
-    drawBody({ ...preset, type: brush, x: pointer.start.x, y: pointer.start.y, color, radius: preset.radius });
+    drawBody({
+        ...preset, id: 0, type: brush, x: pointer.start.x, y: pointer.start.y,
+        vx: velocity.vx, vy: velocity.vy, color, radius: preset.radius
+    });
     ctx.globalAlpha = 1;
 
     // Launch arrow
@@ -2301,6 +2629,7 @@ function render() {
 
     lightSources = bodies.filter(b => b.type === "star");
     useWorldTransform();
+    if (options.orbit) drawPredictedOrbit();
     const dots = [];
     const glowDots = [];
     for (const b of bodies) {
@@ -2333,6 +2662,10 @@ const radiusSlider = document.getElementById("radiusSlider");
 const radiusInput = document.getElementById("radiusInput");
 const vxInput = document.getElementById("vxInput");
 const vyInput = document.getElementById("vyInput");
+const xInput = document.getElementById("xInput");
+const yInput = document.getElementById("yInput");
+const cameraSelect = document.getElementById("cameraSelect");
+const referenceSelects = document.querySelectorAll(".reference-select");
 
 function formatMass(m) {
     if (m >= 1000) return Math.round(m).toLocaleString();
@@ -2398,6 +2731,63 @@ function refreshBodyList() {
     }
 
     document.getElementById("bodyCount").textContent = "(" + bodies.length.toLocaleString() + ")";
+    refreshBodyMenus();
+}
+
+// ---------- Body menus ("Orbit around", "Compared with" and the camera) ----------
+
+// The heaviest bodies: a galaxy's 3,000 stars would make the menus useless
+const MENU_LIMIT = 30;
+
+function menuBodies() {
+    return bodies
+        .filter(b => b.type !== "galaxyStar")
+        .sort((a, b) => b.mass - a.mass)
+        .slice(0, MENU_LIMIT);
+}
+
+// Rebuild a menu, but only if the bodies in it changed
+// (rebuilding a menu while it's open would close it)
+function fillBodyMenu(select, fixedOptions, list, prefix, groupLabel) {
+    const signature = list.map(b => b.id).join(",");
+    if (select.dataset.bodies === signature) return;
+    select.dataset.bodies = signature;
+
+    select.innerHTML = "";
+    for (const [value, text] of fixedOptions) select.add(new Option(text, value));
+    if (list.length === 0) return;
+
+    const group = document.createElement("optgroup");
+    group.label = groupLabel;
+    for (const b of list) group.appendChild(new Option(b.name, prefix + b.id));
+    select.appendChild(group);
+}
+
+function cameraMenuValue() {
+    return camera.follow === "body" && camera.target ? "body:" + camera.target.id : camera.follow;
+}
+
+function refreshBodyMenus() {
+    const heavy = menuBodies();
+
+    // Always list the body currently chosen, even if it isn't one of the heaviest
+    const chosen = referenceId === null ? null : bodies.find(b => b.id === referenceId);
+    const others = heavy.filter(b => b !== selectedBody);
+    if (chosen && chosen !== selectedBody && !others.includes(chosen)) others.push(chosen);
+
+    for (const select of referenceSelects) {
+        fillBodyMenu(select, [["auto", "Strongest pull"]], others, "", "Bodies");
+        select.value = chosen && chosen !== selectedBody ? String(chosen.id) : "auto";
+    }
+
+    const followed = camera.follow === "body" ? camera.target : null;
+    const cameraList = followed && !heavy.includes(followed) ? [...heavy, followed] : heavy;
+    fillBodyMenu(cameraSelect, [
+        ["free", "Free"],
+        ["com", "Follow center of mass"],
+        ["selected", "Follow selected body"]
+    ], cameraList, "body:", "Follow a body");
+    cameraSelect.value = cameraMenuValue();
 }
 
 // 1234 -> "1,234", 45678 -> "46k", 1234567 -> "1.2M"
@@ -2465,6 +2855,7 @@ function updateProperties() {
 
     // Don't overwrite a box the user is typing in
     const focused = document.activeElement;
+    equationsKey = null;
     massSlider.value = sliderFromMass(selectedBody.mass);
     radiusSlider.value = selectedBody.radius;
     if (focused !== massInput) massInput.value = formatNumber(selectedBody.mass);
@@ -2485,6 +2876,8 @@ function refreshLiveReadouts(force = false) {
         const vyInput = document.getElementById("vyInput");
         if (force || document.activeElement !== vxInput) vxInput.value = selectedBody.vx.toFixed(2);
         if (force || document.activeElement !== vyInput) vyInput.value = selectedBody.vy.toFixed(2);
+        if (force || document.activeElement !== xInput) xInput.value = selectedBody.x.toFixed(1);
+        if (force || document.activeElement !== yInput) yInput.value = selectedBody.y.toFixed(1);
         document.getElementById("speedReadout").textContent =
             Math.hypot(selectedBody.vx, selectedBody.vy).toFixed(2);
     }
@@ -2502,7 +2895,10 @@ function refreshLiveReadouts(force = false) {
 
     const integratorName = integrator === "verlet" ? "Velocity Verlet" : "Euler";
     const solverName = solverStats.method === "bh" ? "Barnes-Hut" : "Direct";
-    const pauseText = running ? "" : editState.pausedByEdit ? "PAUSED while editing · " : "PAUSED · ";
+    const pauseText = running ? ""
+        : editState.pausedByEdit ? "PAUSED while editing · "
+        : pointer && pointer.mode === "drag" && pointer.resume ? "PAUSED while moving a body · "
+        : "PAUSED · ";
     const slowText = running && speedRatio < 0.85
         ? " (computer keeping up at " + (simulationSpeed * speedRatio).toFixed(1) + "x)"
         : "";
@@ -2514,6 +2910,260 @@ function refreshLiveReadouts(force = false) {
         " · " + simulationSpeed.toFixed(1) + "x" + slowText;
 
     refreshSolverStats();
+    refreshEquations();
+}
+
+// ---------- Equations tab ----------
+
+/*
+ * Live equations for the selected body. The cards are built once, whenever
+ * the selected body (or the body it's compared with) changes. After that only
+ * the numbers inside them are updated, a few times a second: each number sits
+ * in a <b data-v="name"> tag, and equationValues() works out every name.
+ */
+
+let activeTab = "controls";
+let equationsKey = null;   // which bodies the current cards were built for
+
+function showPanelTab(name) {
+    activeTab = name;
+    document.querySelectorAll(".panel-tab").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.tab === name);
+    });
+    document.getElementById("tab-controls").classList.toggle("hidden", name !== "controls");
+    document.getElementById("tab-equations").classList.toggle("hidden", name !== "equations");
+    document.querySelector(".control-panel").scrollTop = 0;
+    equationsKey = null;
+    refreshEquations();
+}
+
+const SUPERSCRIPTS = {
+    "-": "⁻", "0": "⁰", "1": "¹", "2": "²", "3": "³",
+    "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹"
+};
+
+// Readable numbers: 1234.5 -> "1,235", 0.5 -> "0.5", 0.000123 -> "1.23×10⁻⁴"
+function formatSci(value) {
+    if (!Number.isFinite(value)) return "∞";
+    const size = Math.abs(value);
+    let text;
+    if (size === 0) {
+        text = "0";
+    } else if (size >= 1e6 || size < 1e-3) {
+        const [mantissa, exponent] = value.toExponential(2).split("e");
+        text = mantissa + "×10" + String(Number(exponent)).replace(/./g, c => SUPERSCRIPTS[c]);
+    } else if (size >= 1000) {
+        text = Math.round(value).toLocaleString();
+    } else {
+        text = String(Number(value.toPrecision(3)));
+    }
+    return text.replace("-", "−"); // a proper minus sign
+}
+
+function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Small helpers that build the HTML for the cards
+const num = (name, isResult = false) =>
+    "<b data-v=\"" + name + "\"" + (isResult ? " class=\"result\"" : "") + ">…</b>";
+const frac = (top, bottom) => "<span class=\"frac\"><span>" + top + "</span><span>" + bottom + "</span></span>";
+const eqCard = (title, html) => "<div class=\"eq-card\"><h3>" + title + "</h3>" + html + "</div>";
+const eqLine = html => "<div class=\"eq\">" + html + "</div>";
+const eqSub = html => "<div class=\"eq-sub\">" + html + "</div>";
+const eqRow = (label, html) => "<div class=\"eq-row\"><span>" + label + "</span><span>" + html + "</span></div>";
+const eqNote = html => "<p class=\"eq-note\">" + html + "</p>";
+
+// `b` is the selected body (or null), `other` the body it's compared with (or null)
+function equationCardsHtml(b, other) {
+    let html = "";
+
+    if (b && other) {
+        const name = escapeHtml(b.name);
+        const otherName = escapeHtml(other.name);
+
+        html += eqCard("Newton's law of gravity",
+            eqLine("<i>F</i> = " + frac("<i>G</i> · <i>M</i> · <i>m</i>", "<i>r</i>² + <i>ε</i>²")) +
+            eqSub("= " + frac(G + " × " + num("M") + " × " + num("m"), num("r") + "² + " + num("eps") + "²") +
+                " = " + num("F", true)) +
+            eqNote("The pull between " + name + " (mass <i>m</i>) and " + otherName +
+                " (mass <i>M</i>), a distance <i>r</i> apart. <i>G</i> = 1 in simulation units. " +
+                "<i>ε</i> is softening (How it works §4); real gravity has <i>ε</i> = 0."));
+
+        html += eqCard("Acceleration: Newton's 2nd law",
+            eqLine("<i>a</i> = " + frac("<i>F</i>", "<i>m</i>") + " = " +
+                frac("<i>G</i> · <i>M</i>", "<i>r</i>² + <i>ε</i>²")) +
+            eqSub("= " + frac(num("F"), num("m")) + " = " + num("aOther", true)) +
+            eqNote("<i>m</i> cancels out, so a pebble and a planet in the same spot fall exactly the same way.") +
+            eqRow("All " + num("n") + " bodies together", "|<i>a</i>| = " + num("aNet")) +
+            eqRow("Net force <i>F</i> = <i>m</i> · |<i>a</i>|", num("Fnet")) +
+            eqNote("Every other body pulls too. This total is the orange arrow (Force &amp; velocity arrows)."));
+
+        html += eqCard("Newton's 3rd law",
+            eqNote(otherName + " is pulled toward " + name + " exactly as hard, <i>F</i> = " + num("F") +
+                ". Same force, very different accelerations:") +
+            eqRow(name + ": <i>a</i> = <i>F</i> / <i>m</i>", num("aOther")) +
+            eqRow(otherName + ": <i>a</i> = <i>F</i> / <i>M</i>", num("aBack")) +
+            eqNote("That's why the heavier body barely moves."));
+    }
+
+    if (b) {
+        html += eqCard("Velocity and momentum",
+            eqLine("<i>v</i> = √(<i>v<sub>x</sub></i>² + <i>v<sub>y</sub></i>²)") +
+            eqSub("= √((" + num("vx") + ")² + (" + num("vy") + ")²) = " + num("v", true)) +
+            eqLine("<i>p</i> = <i>m</i> · <i>v</i>") +
+            eqSub("= " + num("m") + " × " + num("v") + " = " + num("p", true)) +
+            eqNote("Momentum is how hard something is to stop. Collisions keep the total momentum the same."));
+
+        html += eqCard("Kinetic energy",
+            eqLine("<i>KE</i> = ½ <i>m v</i>²") +
+            eqSub("= ½ × " + num("m") + " × " + num("v") + "² = " + num("KE", true)) +
+            eqNote("Energy of motion. Twice the speed means four times the energy."));
+    }
+
+    if (b && other) {
+        const name = escapeHtml(b.name);
+        const otherName = escapeHtml(other.name);
+
+        html += eqCard("Gravitational potential energy",
+            eqLine("<i>U</i> = −" + frac("<i>G</i> · <i>M</i> · <i>m</i>", "√(<i>r</i>² + <i>ε</i>²)")) +
+            eqSub("= −" + frac(G + " × " + num("M") + " × " + num("m"), "√(" + num("r") + "² + " + num("eps") + "²)") +
+                " = " + num("Upair", true)) +
+            eqRow("With every body: <i>U</i> = <i>m</i> · <i>φ</i>", num("U")) +
+            eqNote("Negative, because you'd have to <em>add</em> energy to pull them apart. " +
+                "<i>φ</i> is the gravitational potential here: how deep in the well it sits (Gravity field view)."));
+
+        html += eqCard("Orbit around " + otherName,
+            eqNote("Treating " + name + " and " + otherName + " as if they were alone (the two-body problem):") +
+            eqRow("Speed relative to " + otherName, num("vRel")) +
+            eqRow("Circular orbit speed √(<i>G</i>(<i>M</i>+<i>m</i>) / <i>r</i>)", num("vCirc")) +
+            eqRow("Escape speed √(2<i>G</i>(<i>M</i>+<i>m</i>) / <i>r</i>)", num("vEsc")) +
+            eqLine("<i>E</i> = " + frac("<i>v</i>²", "2") + " − " + frac("<i>G</i>(<i>M</i> + <i>m</i>)", "<i>r</i>")) +
+            eqSub("= " + frac(num("vRel") + "²", "2") + " − " + frac(num("mu"), num("r")) + " = " + num("energy", true)) +
+            "<span class=\"orbit-status\" data-v=\"status\"></span>" +
+            eqNote("Orbital energy per unit of mass. Below zero it can't get away: it's bound. " +
+                "Moving faster than escape speed makes <i>E</i> positive, and it leaves for good."));
+
+        html += eqCard("Kepler's 3rd law",
+            eqLine("<i>a</i> = −" + frac("<i>G</i>(<i>M</i> + <i>m</i>)", "2<i>E</i>")) +
+            eqSub("= " + num("axis", true)) +
+            eqLine("<i>T</i> = 2π √(<i>a</i>³ / <i>G</i>(<i>M</i> + <i>m</i>))") +
+            eqSub("= 2π √(" + num("axis") + "³ / " + num("mu") + ") = " + num("period", true)) +
+            eqRow("Eccentricity <i>e</i> (0 = circle)", num("ecc")) +
+            eqRow("One lap in real time", num("realTime")) +
+            eqNote("<i>a</i> is the semi-major axis, half the orbit's longest width. " +
+                "<i>T</i>² grows like <i>a</i>³, so an orbit twice as big takes 2.8× as long. " +
+                "The dashed ellipse on the canvas is this predicted orbit."));
+    }
+
+    html += eqCard("Whole system (" + num("n") + " bodies)",
+        eqRow("Kinetic <i>KE</i> = Σ ½<i>mv</i>²", num("sysKE")) +
+        eqRow("Potential <i>U</i> = Σ −<i>G m</i>₁<i>m</i>₂ / <i>r</i>", num("sysU")) +
+        eqRow("Total <i>E</i> = <i>KE</i> + <i>U</i>", num("sysE")) +
+        eqRow("Total momentum |Σ <i>m</i><b>v</b>|", num("sysP")) +
+        eqNote("With nothing outside pushing on the system, the total energy and momentum stay " +
+            "constant (conservation laws), however wildly the bodies move. Merges turn a little " +
+            "energy into heat."));
+
+    return html;
+}
+
+function equationValues(b, other) {
+    const system = measureEnergyFast();
+    let px = 0, py = 0;
+    for (const body of bodies) {
+        px += body.mass * body.vx;
+        py += body.mass * body.vy;
+    }
+
+    const values = {
+        n: bodies.length,
+        sysKE: system.kinetic,
+        sysU: system.potential,
+        sysE: system.total,
+        sysP: Math.hypot(px, py)
+    };
+    if (!b) return values;
+
+    // measureEnergyFast() made sure ax, ay and phi are up to date
+    const speed = Math.hypot(b.vx, b.vy);
+    const accel = Math.hypot(b.ax, b.ay);
+    Object.assign(values, {
+        m: b.mass,
+        vx: b.vx,
+        vy: b.vy,
+        v: speed,
+        p: b.mass * speed,
+        KE: 0.5 * b.mass * speed * speed,
+        aNet: accel,
+        Fnet: b.mass * accel,
+        U: b.mass * b.phi
+    });
+    if (!other) return values;
+
+    const r = Math.hypot(other.x - b.x, other.y - b.y);
+    const softened = r * r + softening * softening;
+    const force = G * other.mass * b.mass / softened;
+    const orbit = orbitAround(b, other);
+
+    Object.assign(values, {
+        M: other.mass,
+        r,
+        eps: softening,
+        F: force,
+        aOther: force / b.mass,
+        aBack: force / other.mass,
+        Upair: -G * other.mass * b.mass / Math.sqrt(softened),
+        vRel: orbit.v,
+        vCirc: orbit.circularSpeed,
+        vEsc: orbit.escapeSpeed,
+        mu: orbit.mu,
+        energy: orbit.energy,
+        status: orbit.bound ? "Bound: E < 0, it stays in orbit" : "Escaping: E ≥ 0, it won't come back"
+    });
+
+    if (orbit.bound) {
+        const seconds = orbit.period / timeStep / (STEPS_PER_SECOND * simulationSpeed);
+        Object.assign(values, {
+            axis: orbit.a,
+            period: orbit.period,
+            ecc: orbit.e,
+            realTime: "about " + formatSci(seconds) + " s at " + simulationSpeed.toFixed(1) + "x"
+        });
+    } else {
+        Object.assign(values, { axis: "none", period: "never returns", ecc: "1 or more (open path)", realTime: "never" });
+    }
+    return values;
+}
+
+function refreshEquations() {
+    if (activeTab !== "equations") return;
+
+    const b = selectedBody && bodies.includes(selectedBody) ? selectedBody : null;
+    const other = b ? referenceBody(b) : null;
+    const container = document.getElementById("equationCards");
+
+    // Rebuild the cards only when the bodies involved change
+    const key = (b ? b.id : "-") + "/" + (other ? other.id : "-");
+    if (key !== equationsKey) {
+        equationsKey = key;
+        container.innerHTML = equationCardsHtml(b, other);
+        document.getElementById("equationsIntro").textContent = b
+            ? "The forces and energy of " + b.name + " right now. Every number updates live, in simulation units."
+            : "Click a body on the canvas to see the equations acting on it, with live numbers.";
+        document.getElementById("equationsReference").classList.toggle("hidden", !b);
+    }
+
+    const values = equationValues(b, other);
+    for (const el of container.querySelectorAll("[data-v]")) {
+        const value = values[el.dataset.v];
+        el.textContent = typeof value === "number" ? formatSci(value) : value ?? "";
+    }
+
+    const status = container.querySelector(".orbit-status");
+    if (status) status.classList.toggle("escaping", values.energy >= 0);
 }
 
 function updatePlayButton() {
@@ -2591,16 +3241,16 @@ function updateHint() {
         hint.innerHTML =
             "<b>Drag</b> to pan &middot; " +
             "<b>Click</b> a body to inspect it &middot; " +
-            "<b>Scroll</b> to zoom &middot; " +
-            "Pick a body type below to start placing";
+            "<b>Drag a body</b> to move it &middot; " +
+            "<b>Scroll</b> to zoom";
     }
 }
 
 function updateCursor(hovering = false) {
-    if (pointer && pointer.mode === "pan" && pointer.moved) {
+    if (pointer && (pointer.mode === "pan" || pointer.mode === "drag") && pointer.moved) {
         canvas.style.cursor = "grabbing";
     } else if (hovering) {
-        canvas.style.cursor = "pointer";
+        canvas.style.cursor = brush ? "pointer" : "move";
     } else {
         canvas.style.cursor = brush ? "crosshair" : "grab";
     }
@@ -2608,6 +3258,8 @@ function updateCursor(hovering = false) {
 
 function deleteSelected() {
     if (!selectedBody) return;
+    if (camera.target === selectedBody) setCameraFollow("free");
+    if (referenceId === selectedBody.id) referenceId = null;
     bodies = bodies.filter(b => b !== selectedBody);
     selectedBody = null;
     markSystemChanged();
@@ -2642,16 +3294,40 @@ function eventPosition(event) {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
-function setCameraFollow(mode) {
+function setCameraFollow(mode, target = null) {
     camera.follow = mode;
-    document.getElementById("cameraSelect").value = mode;
+    camera.target = target;
+    cameraSelect.value = cameraMenuValue();
+}
+
+// Teleport a body. Its old trail would draw a line across the jump, so it's cleared.
+function moveBody(body, x, y) {
+    body.x = x;
+    body.y = y;
+    body.trail = [];
+    markSystemChanged();
+}
+
+// Let go of whatever the mouse was doing (placing, panning or dragging)
+function cancelPointer() {
+    if (pointer && pointer.mode === "drag") finishDrag();
+    pointer = null;
+    updateCursor();
+}
+
+// Dragging a body pauses the simulation; carry on once it's let go
+function finishDrag() {
+    if (pointer.resume && !running) {
+        running = true;
+        updatePlayButton();
+    }
 }
 
 // ---------- Mouse / touch on the canvas ----------
 
 /*
  * Left button:
- *   - on a body: select it
+ *   - on a body: select it (and with the Select / Pan tool, drag to move it)
  *   - Select / Pan tool: drag to pan, click empty space to deselect
  *   - a body type chosen: drag to throw, click for an automatic orbit
  * Right or middle button: always pans
@@ -2669,10 +3345,9 @@ canvas.addEventListener("pointerdown", event => {
         const hit = bodyAtScreen(screen.x, screen.y);
         if (hit) {
             selectBody(hit);
-            return;
-        }
-
-        if (brush) {
+            if (brush) return;
+            pointer = { mode: "drag", body: hit, startScreen: screen, lastScreen: screen, moved: false, resume: false };
+        } else if (brush) {
             const world = screenToWorld(screen.x, screen.y);
             pointer = {
                 mode: "place",
@@ -2715,6 +3390,28 @@ canvas.addEventListener("pointermove", event => {
     } else if (pointer.mode === "place") {
         pointer.currentScreen = screen;
         pointer.current = screenToWorld(screen.x, screen.y);
+    } else if (pointer.mode === "drag") {
+        if (!pointer.moved) {
+            const distance = Math.hypot(screen.x - pointer.startScreen.x, screen.y - pointer.startScreen.y);
+            if (distance < 4) return;
+            pointer.moved = true;
+            // Gravity can't act normally on a body held by the mouse, so the
+            // simulation waits while you drag, then carries on
+            if (running) {
+                running = false;
+                pointer.resume = true;
+                updatePlayButton();
+            }
+            updateCursor();
+        }
+        // Move by how far the mouse moved (this also works while the camera follows the body)
+        const body = pointer.body;
+        if (bodies.includes(body)) {
+            moveBody(body,
+                body.x + (screen.x - pointer.lastScreen.x) / camera.zoom,
+                body.y + (screen.y - pointer.lastScreen.y) / camera.zoom);
+        }
+        pointer.lastScreen = screen;
     }
 });
 
@@ -2734,14 +3431,10 @@ canvas.addEventListener("pointerup", () => {
     } else if (pointer && pointer.mode === "pan" && pointer.clickDeselects && !pointer.moved) {
         selectBody(null);
     }
-    pointer = null;
-    updateCursor();
+    cancelPointer();
 });
 
-canvas.addEventListener("pointercancel", () => {
-    pointer = null;
-    updateCursor();
-});
+canvas.addEventListener("pointercancel", cancelPointer);
 
 canvas.addEventListener("contextmenu", event => event.preventDefault());
 
@@ -2780,9 +3473,31 @@ document.getElementById("speedSlider").oninput = event => {
     document.getElementById("speedValue").textContent = simulationSpeed.toFixed(1) + "x";
 };
 
-document.getElementById("cameraSelect").onchange = event => {
-    camera.follow = event.target.value;
+cameraSelect.onchange = event => {
+    const value = event.target.value;
+    if (value.startsWith("body:")) {
+        const id = Number(value.slice(5));
+        setCameraFollow("body", bodies.find(b => b.id === id) ?? null);
+    } else {
+        setCameraFollow(value);
+    }
+    event.target.blur();
 };
+
+for (const select of referenceSelects) {
+    select.onchange = event => {
+        referenceId = event.target.value === "auto" ? null : Number(event.target.value);
+        refreshBodyMenus();     // keeps both menus showing the same choice
+        refreshEquations();
+        event.target.blur();
+    };
+}
+
+document.querySelectorAll(".panel-tab").forEach(btn => {
+    btn.onclick = () => showPanelTab(btn.dataset.tab);
+});
+
+document.getElementById("showEquationsBtn").onclick = () => showPanelTab("equations");
 
 document.getElementById("integratorSelect").onchange = event => {
     integrator = event.target.value;
@@ -2806,6 +3521,7 @@ const toggles = {
     autoPauseToggle: "autoPause",
     trailToggle: "trails",
     vectorToggle: "vectors",
+    orbitToggle: "orbit",
     fieldToggle: "field",
     mergeToggle: "merge",
     labelToggle: "labels"
@@ -2885,6 +3601,16 @@ radiusInput.addEventListener("change", () => {
     if (selectedBody) radiusInput.value = formatNumber(selectedBody.radius);
 });
 
+// Position boxes move the body when you press Enter or leave the box
+for (const axis of ["x", "y"]) {
+    document.getElementById(axis + "Input").addEventListener("change", event => {
+        const body = editableBody();
+        const value = Number(event.target.value);
+        if (!body || event.target.value === "" || !Number.isFinite(value)) return;
+        moveBody(body, axis === "x" ? value : body.x, axis === "y" ? value : body.y);
+    });
+}
+
 for (const axis of ["x", "y"]) {
     document.getElementById("v" + axis + "Input").addEventListener("change", event => {
         const body = editableBody();
@@ -2924,7 +3650,7 @@ window.addEventListener("pointerup", stopSliderDrag);
 window.addEventListener("pointercancel", stopSliderDrag);
 
 // Number boxes: editing lasts while the cursor is in the box. Enter finishes.
-for (const input of [massInput, radiusInput, vxInput, vyInput]) {
+for (const input of [massInput, radiusInput, xInput, yInput, vxInput, vyInput]) {
     input.addEventListener("focus", () => beginEdit(input.id));
     input.addEventListener("blur", () => endEdit(input.id));
     input.addEventListener("keydown", event => {
@@ -2934,9 +3660,10 @@ for (const input of [massInput, radiusInput, vxInput, vyInput]) {
 
 document.getElementById("orbitBtn").onclick = () => {
     if (!selectedBody) return;
-    const attractor = dominantAttractor(selectedBody.x, selectedBody.y, selectedBody);
+    const attractor = referenceBody(selectedBody);
     if (!attractor) return;
-    const v = circularVelocity(selectedBody.x, selectedBody.y, selectedBody.mass, attractor);
+    const direction = Number(document.getElementById("orbitDirection").value);
+    const v = circularVelocity(selectedBody.x, selectedBody.y, selectedBody.mass, attractor, direction);
     selectedBody.vx = v.vx;
     selectedBody.vy = v.vy;
     markSystemChanged();
@@ -2965,16 +3692,18 @@ window.addEventListener("keydown", event => {
     } else if (event.key === "Delete" || event.key === "Backspace") {
         deleteSelected();
     } else if (event.key === "Escape") {
-        pointer = null;
+        cancelPointer();
         setBrush("select");
         selectBody(null);
     } else if (event.key === "r" || event.key === "R") {
         loadScenario(currentScenario);
     } else if (event.key === "f" || event.key === "F") {
         fitView();
-    } else if (["1", "2", "3", "4"].includes(event.key)) {
+    } else if (event.key === "e" || event.key === "E") {
+        showPanelTab(activeTab === "equations" ? "controls" : "equations");
+    } else if (/^[1-9]$/.test(event.key) && Number(event.key) <= BRUSH_KEYS.length) {
         // Pressing the key of the active tool again goes back to Select / Pan
-        setBrush(["planet", "star", "moon", "blackhole"][Number(event.key) - 1]);
+        setBrush(BRUSH_KEYS[Number(event.key) - 1]);
     }
 });
 
