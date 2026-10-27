@@ -475,8 +475,8 @@
                 the nearest star, not behind it: sunlight and the solar wind
                 push gas and dust off the comet. The tail grows as the comet
                 gets closer and hotter. A <b>neutron star</b> is the collapsed
-                core of a giant star: twice the Sun's mass squeezed into a
-                ball the size of a city. From far away it pulls exactly like
+                core of a giant star: about 1.4 times the Sun's mass squeezed
+                into a ball the size of a city. From far away it pulls exactly like
                 a normal star of the same mass. You can only tell the
                 difference up close.
             </p>
@@ -529,6 +529,16 @@
                 body show how far above or below it they are. Move the view
                 with right-drag, W A S D, Q / Z (up and down) or the buttons on
                 the canvas; Fit View (F) or following a body also sets its height.
+            </p>
+
+            <h3>12. How we checked the physics</h3>
+            <p>
+                34 automated tests compare the simulator with answers worked
+                out independently: Kepler's laws, escape speed, conservation of
+                energy and momentum, collisions, the known figure-8 solution,
+                and Barnes-Hut against the exact method. All pass. The details
+                are in <code>VALIDATION.md</code>, and anyone can rerun them
+                with <code>node tests/validate.js</code>.
             </p>
 
             <h3>Credits</h3>
