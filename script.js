@@ -100,6 +100,7 @@ const options = {
     fieldArrows: false,
     grid: true,
     stars: true,       // the background stars
+    perf: false,       // frames per second and timings in the readout
     spinView: false,
     tree: false,
     merge: true,
@@ -287,6 +288,8 @@ function computeForcesDirect(list, isMain) {
  * Children are always created after their parent, so walking the node list
  * backwards visits children before parents.
  */
+// Measured (3,000-body galaxy): smaller leaves mean fewer pulls per body
+// but more leaves to walk the tree for; 6 to 8 was fastest overall.
 const LEAF_CAPACITY = 8;
 
 const tree = {
@@ -417,9 +420,22 @@ function insertBody(i) {
     }
 }
 
+/*
+ * The tree is needed by the physics and also by the gravity field, the
+ * arrows, the tree view and the launch preview. Building it takes time, so
+ * `positionStamp` counts every change to the bodies' positions or masses:
+ * if nothing has changed since the tree was built, it can be reused.
+ */
+let positionStamp = 0;
+
+function ensureTree() {
+    if (tree.list !== bodies || tree.stamp !== positionStamp) buildTree(bodies);
+}
+
 function buildTree(list) {
     const n = list.length;
     tree.list = list;
+    tree.stamp = list === bodies ? positionStamp : -1;
     tree.count = 0;
 
     if (tree.next.length < n) {
@@ -753,6 +769,7 @@ function stepVerlet(list, dt, isMain = false) {
         b.y += b.vy * dt;
         b.z += b.vz * dt;
     }
+    if (list === bodies) positionStamp++;
 
     computeForces(list, isMain);
 
@@ -782,6 +799,7 @@ function stepEuler(list, dt) {
         b.vy += b.ay * dt;
         b.vz += b.az * dt;
     }
+    if (list === bodies) positionStamp++;
 }
 
 function physicsStep() {
@@ -822,18 +840,19 @@ let sweepOrder = new Int32Array(0);
 let sweepLeft = new Float64Array(0);
 
 function findTouchingPairs() {
-    const n = bodies.length;
-    if (sweepOrder.length < n) {
-        sweepOrder = new Int32Array(n * 2);
-        sweepLeft = new Float64Array(n * 2);
+    if (sweepOrder.length < bodies.length) {
+        sweepOrder = new Int32Array(bodies.length * 2);
+        sweepLeft = new Float64Array(bodies.length * 2);
     }
 
-    let maxRadius = 0;
-    for (let i = 0; i < n; i++) {
+    // Only bodies that can collide take part (in a galaxy that's just the
+    // two black holes, instead of sorting 3,000 stars every step)
+    let n = 0;
+    for (let i = 0; i < bodies.length; i++) {
         const b = bodies[i];
+        if (b.collisionless) continue;
         sweepLeft[i] = b.x - b.radius;   // left edge of each body
-        sweepOrder[i] = i;
-        if (b.radius > maxRadius) maxRadius = b.radius;
+        sweepOrder[n++] = i;
     }
 
     const order = sweepOrder.subarray(0, n);
@@ -1015,6 +1034,7 @@ function recordEnergy() {
 // Call whenever the user (or a collision) changes the system, so the
 // energy drift measurement starts fresh from the new situation.
 function markSystemChanged() {
+    positionStamp++;
     accelerationsFresh = false;
     energyBaseline = null;
     pendingEnergyEvent = true;
@@ -1254,7 +1274,7 @@ function predictPath(start, velocity) {
  * Good for short previews; less accurate the further ahead it looks.
  */
 function predictPathFrozen(start, velocity) {
-    buildTree(bodies);
+    ensureTree();
 
     const preset = BODY_TYPES[brush];
     const theta2 = 0.8 * 0.8;
@@ -2919,19 +2939,25 @@ function updateField() {
         return;
     }
 
-    // Big systems use the Barnes-Hut tree here too (about 60 pulls per point
-    // instead of n), and recalculate less often: the field changes slowly
+    // Nothing moved and the camera's still (e.g. paused): the picture from
+    // last time is still right. (Turning the camera doesn't change it.)
     const n = bodies.length;
+    const key = [mode, positionStamp, n, camera.x, camera.y, camera.z, camera.distance].join("/");
+    if (field.ready && key === field.key) return;
+    // Otherwise recalculate every 2nd frame (3rd for big systems): the field
+    // changes slowly. Big systems use the Barnes-Hut tree here too (about 60
+    // pulls per point instead of n).
     const useTreeForField = n > FIELD_TREE_LIMIT;
-    const every = useTreeForField ? 3 : n > 20 ? 2 : 1;
+    const every = useTreeForField ? 3 : 2;
     if (field.ready && field.mode === mode && frameCount % every !== 0) return;
+    field.key = key;
     field.mode = mode;
-    if (useTreeForField) buildTree(bodies);
+    if (useTreeForField) ensureTree();
 
     // Points across the picture: as many as possible while keeping the
     // total work (points x pulls per point) about the same
     const work = useTreeForField ? 60 : n;
-    const points = clamp(Math.floor(Math.sqrt(700000 / work)), SHEET_CELLS + 1, 193);
+    const points = clamp(Math.floor(Math.sqrt(500000 / work)), SHEET_CELLS + 1, 161);
     const size = camera.distance * 2.2;
     const cell = size / (points - 1);
     const planeZ = camera.z;
@@ -3052,9 +3078,14 @@ function updateArrows() {
         arrows.userData.ready = false;
         return;
     }
+    // Same rules as the gravity field: skip when nothing changed, and
+    // recalculate big systems every 3rd frame
     const useTree = bodies.length > FIELD_TREE_LIMIT;
+    const key = [positionStamp, bodies.length, camera.x, camera.y, camera.z, camera.distance].join("/");
+    if (arrows.userData.ready && key === arrows.userData.key) return;
     if (useTree && arrows.userData.ready && frameCount % 3 !== 0) return;
-    if (useTree) buildTree(bodies);
+    arrows.userData.key = key;
+    if (useTree) ensureTree();
 
     // Spaced to suit the zoom, and snapped so they don't slide as the view
     // pans. Layers are closer together in z, so the top layer stays well
@@ -3129,75 +3160,84 @@ scene.add(treeLines);
 const CUBE_EDGES = [0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7];
 
 function updateTreeOverlay() {
-    treeView = null;
     treeLines.visible = options.tree && bodies.length > 0;
-    if (!treeLines.visible) return;
-
-    buildTree(bodies);
-    const segments = []; // x, y, z, r, g, b for each end of each line
-
-    const line = (a, b, rgb) => segments.push(a.x, a.y, a.z, ...rgb, b.x, b.y, b.z, ...rgb);
-    const box = (k, rgb) => {
-        const h = tree.half[k];
-        const corner = c => ({
-            x: tree.cx[k] + (c & 1 ? h : -h),
-            y: tree.cy[k] + (c & 2 ? h : -h),
-            z: tree.cz[k] + (c & 4 ? h : -h)
-        });
-        for (let e = 0; e < CUBE_EDGES.length; e += 2) line(corner(CUBE_EDGES[e]), corner(CUBE_EDGES[e + 1]), rgb);
-    };
-
-    // Every cube in the tree, faintly
-    for (let k = 0; k < tree.count; k++) box(k, [0.05, 0.065, 0.085]);
-
-    // What the selected body's group uses
-    const i = selectedBody ? bodies.indexOf(selectedBody) : -1;
-    const L = i >= 0 ? leafOfBody(i) : -1;
-    if (L >= 0) {
-        gatherInteractions(L, theta * theta);
-        const orange = [0.98, 0.57, 0.24];
-        const faintOrange = [0.45, 0.26, 0.1];
-        const cyan = [0.13, 0.83, 0.93];
-        const faintCyan = [0.06, 0.38, 0.43];
-
-        // Far cubes, with a line to the point where their mass is counted
-        for (let n = 0; n < groupNodeCount; n++) {
-            const k = groupNodes[n];
-            box(k, faintOrange);
-            line(selectedBody, { x: tree.comX[k], y: tree.comY[k], z: tree.comZ[k] }, orange);
-        }
-        // Nearby bodies, one by one
-        for (let n = 0; n < groupBodyCount; n++) {
-            const b = bodies[groupBodies[n]];
-            if (b !== selectedBody) line(selectedBody, b, faintCyan);
-        }
-        // The selected body's own cube
-        box(L, cyan);
-
-        treeView = { groups: groupNodeCount, singles: groupBodyCount - 1, n: bodies.length };
+    if (!treeLines.visible) {
+        treeView = null;
+        return;
     }
 
-    const count = segments.length / 6;
+    // Nothing moved and nothing else changed: the lines from last time are still right
+    const key = positionStamp + "/" + bodies.length + "/" + (selectedBody ? selectedBody.id : "-") + "/" + theta;
+    if (key === treeLines.userData.key) return;
+    treeLines.userData.key = key;
+
+    ensureTree();
+    const i = selectedBody ? bodies.indexOf(selectedBody) : -1;
+    const L = i >= 0 ? leafOfBody(i) : -1;
+    if (L >= 0) gatherInteractions(L, theta * theta);
+    const farCount = L >= 0 ? groupNodeCount : 0;
+    const nearCount = L >= 0 ? groupBodyCount : 0;
+
+    // Room for every line end: 24 per cube (12 edges), 2 per straight line
+    const needed = (tree.count + farCount + 1) * 24 + (farCount + nearCount) * 2;
     const geometry = treeLines.geometry;
-    if (treeLines.userData.capacity === 0 || treeLines.userData.capacity < count) {
-        const capacity = Math.max(64, count * 2);
+    if (treeLines.userData.capacity < needed) {
+        const capacity = Math.max(1024, needed * 2);
         geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
         geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
         treeLines.userData.capacity = capacity;
     }
+    // Written straight into the graphics card's arrays (no small objects
+    // created per line, which matters with thousands of cubes every frame)
     const position = geometry.attributes.position.array;
     const color = geometry.attributes.color.array;
-    for (let v = 0; v < count; v++) {
-        position[v * 3] = segments[v * 6];
-        position[v * 3 + 1] = segments[v * 6 + 1];
-        position[v * 3 + 2] = segments[v * 6 + 2];
-        color[v * 3] = segments[v * 6 + 3];
-        color[v * 3 + 1] = segments[v * 6 + 4];
-        color[v * 3 + 2] = segments[v * 6 + 5];
+    let v = 0;
+    const point = (x, y, z, r, g, b) => {
+        position[v * 3] = x;
+        position[v * 3 + 1] = y;
+        position[v * 3 + 2] = z;
+        color[v * 3] = r;
+        color[v * 3 + 1] = g;
+        color[v * 3 + 2] = b;
+        v++;
+    };
+    const box = (k, r, g, b) => {
+        const h = tree.half[k];
+        for (let e = 0; e < CUBE_EDGES.length; e++) {
+            const c = CUBE_EDGES[e]; // corner bits: 1 = +x, 2 = +y, 4 = +z
+            point(tree.cx[k] + (c & 1 ? h : -h), tree.cy[k] + (c & 2 ? h : -h), tree.cz[k] + (c & 4 ? h : -h), r, g, b);
+        }
+    };
+
+    // Every cube in the tree, faintly
+    for (let k = 0; k < tree.count; k++) box(k, 0.05, 0.065, 0.085);
+
+    treeView = null;
+    if (L >= 0) {
+        const s = selectedBody;
+        // Far cubes (faint orange), with a line to the point where their mass is counted
+        for (let n = 0; n < farCount; n++) {
+            const k = groupNodes[n];
+            box(k, 0.45, 0.26, 0.1);
+            point(s.x, s.y, s.z, 0.98, 0.57, 0.24);
+            point(tree.comX[k], tree.comY[k], tree.comZ[k], 0.98, 0.57, 0.24);
+        }
+        // Nearby bodies, one by one (cyan lines)
+        for (let n = 0; n < nearCount; n++) {
+            const b = bodies[groupBodies[n]];
+            if (b === s) continue;
+            point(s.x, s.y, s.z, 0.06, 0.38, 0.43);
+            point(b.x, b.y, b.z, 0.06, 0.38, 0.43);
+        }
+        // The selected body's own cube
+        box(L, 0.13, 0.83, 0.93);
+
+        treeView = { groups: farCount, singles: nearCount - 1, n: bodies.length };
     }
+
     geometry.attributes.position.needsUpdate = true;
     geometry.attributes.color.needsUpdate = true;
-    geometry.setDrawRange(0, count);
+    geometry.setDrawRange(0, v);
 }
 
 // ---------- Placing new bodies ----------
@@ -3473,14 +3513,15 @@ function drawEnergyChart() {
     c.stroke();
 
     // Events (collisions, edits)
+    // (all in one path: Planet Formation can have hundreds of them)
     c.strokeStyle = "rgba(250,204,21,0.45)";
+    c.beginPath();
     energyHistory.forEach((e, i) => {
         if (!e.event) return;
-        c.beginPath();
         c.moveTo(xFor(i), 0);
         c.lineTo(xFor(i), h);
-        c.stroke();
     });
+    c.stroke();
     c.setLineDash([]);
 
     const series = [
@@ -3690,6 +3731,10 @@ function refreshSolverStats() {
     } else if (solverStats.method === "direct") {
         html = "<b>Direct</b>: every pair is checked, <b>" + formatCount(pairs) +
             "</b> pair calculations per step.";
+        if (n > 1000) {
+            html += "<br><span class=\"warning\">That's a lot for Direct, so expect it to run slowly. " +
+                "\"Auto\" switches to Barnes-Hut above " + AUTO_TREE_THRESHOLD + " bodies.</span>";
+        }
     } else {
         const ratio = pairs / Math.max(1, solverStats.interactions);
         html = "<b>Barnes-Hut</b>: <b>" + formatCount(solverStats.interactions) +
@@ -3786,12 +3831,16 @@ function refreshLiveReadouts(force = false) {
     const slowText = running && speedRatio < 0.85
         ? " (computer keeping up at " + (simulationSpeed * speedRatio).toFixed(1) + "x)"
         : "";
+    const perfText = options.perf
+        ? " · " + Math.round(perf.fps) + " fps (physics " + perf.physicsMs.toFixed(1) +
+          " ms, drawing " + perf.drawMs.toFixed(1) + " ms)"
+        : "";
     document.getElementById("hud").textContent =
         pauseText +
         "t = " + simTime.toFixed(1) +
         " · " + bodies.length.toLocaleString() + " bodies · " + integratorName +
         " · " + solverName +
-        " · " + simulationSpeed.toFixed(1) + "x" + slowText;
+        " · " + simulationSpeed.toFixed(1) + "x" + slowText + perfText;
 
     document.getElementById("planeHeight").textContent = "z " + Math.round(camera.z);
 
@@ -4620,6 +4669,7 @@ const toggles = {
     gridToggle: "grid",
     starsToggle: "stars",
     arrowsToggle: "fieldArrows",
+    perfToggle: "perf",
     spinToggle: "spinView",
     mergeToggle: "merge",
     labelToggle: "labels"
@@ -4947,10 +4997,15 @@ window.addEventListener("keydown", event => {
 
 let lastFrameTime = null;
 
+// Smoothed timings for the performance readout (milliseconds per frame)
+const perf = { fps: 60, physicsMs: 0, drawMs: 0 };
+
 function frame(now) {
     // Real elapsed time, so the simulation runs the same speed on 60 Hz and 120 Hz screens
-    const elapsed = lastFrameTime === null ? 16.7 : Math.min(now - lastFrameTime, 50);
+    const realElapsed = lastFrameTime === null ? 16.7 : now - lastFrameTime;
+    const elapsed = Math.min(realElapsed, 50);
     lastFrameTime = now;
+    perf.fps = perf.fps * 0.95 + 1000 / Math.max(realElapsed, 1) * 0.05;
 
     if (running) {
         stepAccumulator += simulationSpeed * STEPS_PER_SECOND * elapsed / 1000;
@@ -4974,6 +5029,7 @@ function frame(now) {
             if (performance.now() - physicsStart > PHYSICS_BUDGET_MS) break;
         }
         if (done < wanted) stepAccumulator = 0;
+        perf.physicsMs = perf.physicsMs * 0.9 + (performance.now() - physicsStart) * 0.1;
 
         // Smoothed "how much of the requested speed are we managing?"
         const expected = simulationSpeed * STEPS_PER_SECOND * elapsed / 1000;
@@ -4994,14 +5050,18 @@ function frame(now) {
     if (options.spinView && !pointer) camera.yaw += elapsed * 0.00006;
 
     updateCameraFollow();
+    const drawStart = performance.now();
     render();
+    perf.drawMs = perf.drawMs * 0.9 + (performance.now() - drawStart) * 0.1;
+    if (!running) perf.physicsMs *= 0.9;
 
     frameCount++;
+    // Merges change the body list; rebuilding it is slow-ish, so a few times a second is plenty
+    if (frameCount % 15 === 0 && bodyListDirty) {
+        refreshBodyList();
+        updateProperties();
+    }
     if (frameCount % 3 === 0) {
-        if (bodyListDirty) {
-            refreshBodyList();
-            updateProperties();
-        }
         drawEnergyChart();
         refreshLiveReadouts();
     }
