@@ -44,30 +44,51 @@
 
             <div class="hud" id="hud"></div>
 
-            <div class="scenario-note" id="scenarioNote"></div>
+            <div class="toast" id="toast" role="status"></div>
 
-            <div class="canvas-hint" id="canvasHint"></div>
+            <!-- Panels on the canvas: click a tab to open or close it -->
+            <section class="canvas-panel scenario-panel" id="scenarioPanel">
+                <button class="canvas-panel-tab" aria-expanded="true" aria-controls="scenarioNote">
+                    <span class="panel-icon" aria-hidden="true">&#9432;</span>
+                    Scenario: <span id="scenarioName"></span>
+                    <span class="chevron" aria-hidden="true"></span>
+                </button>
+                <div class="canvas-panel-body" id="scenarioNote"></div>
+            </section>
 
-            <!-- Buttons to move the view: hold one down to keep moving -->
-            <div class="nav-pad" id="navPad" aria-label="Move the view">
-                <button data-move="turnLeft" title="Turn left (&larr;)">&#10226;</button>
-                <button data-move="forward" title="Slide forward (W)">&#9650;</button>
-                <button data-move="turnRight" title="Turn right (&rarr;)">&#10227;</button>
-                <button data-move="up" class="lift" title="Move the view and the grid up (Q)">Up</button>
-                <button data-move="left" title="Slide left (A)">&#9664;</button>
-                <button id="navFit" title="Fit everything in view (F)">&#8982;</button>
-                <button data-move="right" title="Slide right (D)">&#9654;</button>
-                <span class="plane-height" id="planeHeight" title="Height of the grid: new bodies are placed here">z 0</span>
-                <button data-move="zoomOut" title="Zoom out (scroll)">&minus;</button>
-                <button data-move="back" title="Slide back (S)">&#9660;</button>
-                <button data-move="zoomIn" title="Zoom in (scroll)">+</button>
-                <button data-move="down" class="lift" title="Move the view and the grid down (Z)">Down</button>
-            </div>
+            <section class="canvas-panel controls-panel opens-up" id="controlsPanel">
+                <button class="canvas-panel-tab" aria-expanded="true" aria-controls="controlsBody">
+                    <span class="panel-icon" aria-hidden="true">&#10021;</span>
+                    View controls<span class="tool-badge" id="toolBadge"></span>
+                    <span class="chevron" aria-hidden="true"></span>
+                </button>
+                <div class="canvas-panel-body" id="controlsBody">
+                    <p class="canvas-hint" id="canvasHint"></p>
+
+                    <!-- Buttons to move the view: hold one down to keep moving -->
+                    <div class="nav-pad" id="navPad" aria-label="Move the view">
+                        <button data-move="turnLeft" title="Turn left (&larr;)">&#10226;</button>
+                        <button data-move="forward" title="Slide forward (W)">&#9650;</button>
+                        <button data-move="turnRight" title="Turn right (&rarr;)">&#10227;</button>
+                        <button data-move="up" class="lift" title="Move the view and the grid up (Q)">Up</button>
+                        <button data-move="left" title="Slide left (A)">&#9664;</button>
+                        <button id="navFit" title="Fit everything in view (F)">&#8982;</button>
+                        <button data-move="right" title="Slide right (D)">&#9654;</button>
+                        <span class="plane-height" id="planeHeight" title="Height of the grid: new bodies are placed here">z 0</span>
+                        <button data-move="zoomOut" title="Zoom out (scroll)">&minus;</button>
+                        <button data-move="back" title="Slide back (S)">&#9660;</button>
+                        <button data-move="zoomIn" title="Zoom in (scroll)">+</button>
+                        <button data-move="down" class="lift" title="Move the view and the grid down (Z)">Down</button>
+                    </div>
+                </div>
+            </section>
         </div>
 
         <div class="simulation-controls">
             <button id="playPauseBtn" class="primary">Pause</button>
             <button id="resetBtn">Reset</button>
+            <button id="undoBtn" disabled title="Nothing to undo">&#8630; Undo</button>
+            <button id="redoBtn" disabled title="Nothing to redo">&#8631; Redo</button>
             <button id="clearTrailsBtn">Clear Trails</button>
             <button id="centerViewBtn">Fit View <kbd>F</kbd></button>
             <button id="topViewBtn" title="Switch between looking straight down and the tilted 3D view">Top View <kbd>T</kbd></button>
@@ -171,7 +192,8 @@
                 <select id="fieldSelect">
                     <option value="off">Off</option>
                     <option value="map">Contour map: glow and rings</option>
-                    <option value="sheet">Rubber sheet: gravity wells</option>
+                    <option value="sheet">Rubber sheet: how deep the wells are</option>
+                    <option value="pull">Pull sheet: which way gravity pulls</option>
                 </select>
             </label>
 
@@ -181,8 +203,10 @@
                 </label>
                 <label><input type="checkbox" id="trailToggle" checked> Trails</label>
                 <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
+                <label title="Arrows all around the view, pointing the way gravity pulls"><input type="checkbox" id="arrowsToggle"> Gravity field arrows (3D)</label>
                 <label title="The ellipse Kepler's laws predict for the selected body"><input type="checkbox" id="orbitToggle" checked> Predicted orbit (Kepler ellipse)</label>
                 <label><input type="checkbox" id="gridToggle" checked> Reference grid</label>
+                <label><input type="checkbox" id="starsToggle" checked> Background stars</label>
                 <label><input type="checkbox" id="spinToggle"> Slowly turn the view</label>
                 <label><input type="checkbox" id="treeToggle"> Show Barnes-Hut tree</label>
                 <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
@@ -380,6 +404,15 @@
                 falls straight across them, downhill.
                 <b>Rubber sheet</b>: the same slice, pushed down by the well's
                 depth. An orbit is like a marble circling round a funnel.
+                But the sheet's "down" isn't a real direction: it shows how
+                <em>deep</em> the well is, not which way gravity <em>pulls</em>.
+                <b>Pull sheet</b> fixes that: the same depth, but each point is
+                pushed the way gravity really pulls there. Slice above a planet
+                and it sags down to it; below, it bulges up to it; level with
+                it, the lines are drawn in sideways.
+                <b>Gravity field arrows</b> show the pull all around at once:
+                each arrow points along <code>g</code>, the pull per unit of
+                mass, longer and brighter where it's stronger.
                 Gravity has no edge; it reaches forever and just gets weaker,
                 so both fade out smoothly instead of stopping. Depth uses a
                 logarithmic scale, otherwise stars' wells would be too deep to
@@ -470,6 +503,11 @@
                 stays flat in its own plane, because angular momentum
                 (<code>r &times; v</code>) is conserved; the tilted galaxies
                 show what happens when two such planes meet.
+            </p>
+            <p>
+                Misclicked? <b>Undo</b> (Ctrl+Z) puts the system back to just
+                before your last change, rewinding time to that moment.
+                <b>Redo</b> (Ctrl+Shift+Z) goes forward again.
             </p>
             <p>
                 The picture is drawn with Three.js. Our code keeps the camera

@@ -114,18 +114,12 @@ canvas#universe {
     touch-action: none;
 }
 
-/* Buttons to move the view, in the canvas's bottom-right corner */
+/* Buttons to move the view, inside the View controls panel */
 .nav-pad {
-    position: absolute;
-    right: 12px;
-    bottom: 44px;
     display: grid;
     grid-template-columns: repeat(3, 30px) 44px;
     gap: 4px;
-    padding: 6px;
-    background: rgba(15, 22, 40, 0.75);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    justify-content: end;
     user-select: none;
     -webkit-user-select: none;
 }
@@ -183,36 +177,94 @@ canvas#overlay {
     border-radius: 6px;
 }
 
-.scenario-note {
+/* "Undone: ..." message in the middle of the canvas */
+.toast {
     position: absolute;
-    top: 10px;
-    right: 12px;
-    max-width: 320px;
-    font-size: 12px;
-    color: #cbd5e1;
-    background: rgba(15, 22, 40, 0.85);
-    border: 1px solid var(--border);
-    padding: 8px 10px;
-    border-radius: 8px;
+    top: 40%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: rgba(15, 22, 40, 0.92);
+    border: 1px solid var(--accent);
+    font-size: 13px;
     pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s;
 }
 
-.scenario-note:empty {
+.toast.visible {
+    opacity: 1;
+}
+
+/* ---------- Panels on the canvas (Scenario, View controls) ---------- */
+
+.canvas-panel {
+    position: absolute;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    max-width: 320px;
+}
+
+.scenario-panel {
+    top: 10px;
+}
+
+/* The controls sit at the bottom, so their tab is at the bottom and the panel opens upward */
+.controls-panel {
+    bottom: 10px;
+    flex-direction: column-reverse;
+}
+
+.canvas-panel-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 11px;
+    font-size: 12px;
+    border-radius: 999px;
+    background: rgba(15, 22, 40, 0.88);
+    max-width: 100%;
+}
+
+.canvas-panel-tab .panel-icon {
+    color: var(--accent);
+    font-size: 13px;
+}
+
+.canvas-panel-tab .chevron {
+    color: var(--muted);
+    font-size: 10px;
+}
+
+.tool-badge {
+    color: #fde68a;
+}
+
+.canvas-panel-body {
+    background: rgba(15, 22, 40, 0.88);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+
+.canvas-panel.collapsed .canvas-panel-body {
     display: none;
 }
 
+.scenario-panel .canvas-panel-body {
+    font-size: 12px;
+    color: #cbd5e1;
+}
+
 .canvas-hint {
-    position: absolute;
-    bottom: 10px;
-    left: 50%;
-    transform: translateX(-50%);
+    max-width: 290px;
+    margin-bottom: 8px;
     font-size: 12px;
     color: var(--muted);
-    background: rgba(2, 4, 11, 0.7);
-    padding: 5px 12px;
-    border-radius: 999px;
-    white-space: nowrap;
-    pointer-events: none;
 }
 
 .canvas-hint b {
@@ -245,6 +297,16 @@ button {
 button:hover {
     background: #22304d;
     border-color: #36476a;
+}
+
+button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+button:disabled:hover {
+    background: var(--panel-2);
+    border-color: var(--border);
 }
 
 button.primary {
@@ -767,20 +829,13 @@ kbd {
         max-height: none;
     }
 
-    .canvas-hint {
-        white-space: normal;
-        width: 92%;
-        text-align: center;
+    /* Below the readout in the top-left corner, which is wider on a phone */
+    .scenario-panel {
+        top: 34px;
     }
 
-    .scenario-note {
-        display: none;
-    }
-
-    /* On small screens the hint sits at the bottom, so the pad moves up */
-    .nav-pad {
-        bottom: auto;
-        top: 40px;
+    .canvas-panel {
         right: 8px;
+        max-width: calc(100% - 16px);
     }
 }

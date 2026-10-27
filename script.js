@@ -96,8 +96,10 @@ const options = {
     trails: true,
     vectors: false,
     orbit: true,
-    field: "off",      // gravity field view: "off", "map" (contour map) or "sheet" (rubber sheet)
+    field: "off",      // gravity field view: "off", "map" (contour map), "sheet" (rubber sheet) or "pull" (pull sheet)
+    fieldArrows: false,
     grid: true,
+    stars: true,       // the background stars
     spinView: false,
     tree: false,
     merge: true,
@@ -114,7 +116,8 @@ const options = {
 const editState = {
     sources: new Set(),
     target: null,        // the body the edit started on
-    pausedByEdit: false
+    pausedByEdit: false,
+    undoSaved: false     // whether this edit has saved its undo step yet
 };
 
 // The body the selected body is compared with: what it orbits in the
@@ -1762,8 +1765,17 @@ function loadScenario(name) {
     refreshBodyList();
     updateProperties();
 
-    document.getElementById("scenarioSelect").value = name;
-    document.getElementById("scenarioNote").textContent = scenario.note;
+    showScenarioInfo(name);
+    // Show the description each time a scenario starts (it can be closed again)
+    setPanelOpen(document.getElementById("scenarioPanel"), true);
+}
+
+// The scenario's name and description, in the menu and the Scenario panel
+function showScenarioInfo(name) {
+    const select = document.getElementById("scenarioSelect");
+    select.value = name;
+    document.getElementById("scenarioName").textContent = select.selectedOptions[0].textContent;
+    document.getElementById("scenarioNote").textContent = (SCENARIOS[name] || SCENARIOS.solar).note;
 }
 
 
@@ -2719,7 +2731,14 @@ function updateHeightLines() {
  *   (Q / Z) to slide the slice through the field.
  *
  *   Rubber sheet: the same picture, with each point pushed down by the depth
- *   of the well. A body circling a funnel is like a planet orbiting.
+ *   of the well. A body circling a funnel is like a planet orbiting. But
+ *   "down" here isn't a real direction: the sheet shows how DEEP the well
+ *   is, not which way gravity PULLS.
+ *
+ *   Pull sheet: the same depth, but each point is pushed the way gravity
+ *   really pulls there (the field g, see gravityAt). Slice above a planet and
+ *   the sheet sags down to it; below it, the sheet bulges up to it; level
+ *   with it, the lines are drawn in sideways.
  *
  * Gravity has no edge: it reaches forever and just gets weaker, so the
  * picture fades out smoothly instead of stopping. Depth uses a logarithmic
@@ -2780,6 +2799,45 @@ const field = (() => {
         ready: false, mode: "off"
     };
 })();
+
+/*
+ * The pull of gravity (the field g: acceleration per unit mass) at point
+ * (x, y, z), using the same softening as the field picture. Big systems use
+ * the Barnes-Hut tree, which must already be built.
+ */
+function gravityAt(x, y, z, eps2, useTree) {
+    if (useTree) {
+        walkTree(x, y, z, -1, 1.69, eps2);
+        return { x: walkAx, y: walkAy, z: walkAz };
+    }
+    let gx = 0, gy = 0, gz = 0;
+    for (const b of bodies) {
+        const dx = b.x - x;
+        const dy = b.y - y;
+        const dz = b.z - z;
+        const d2 = dx * dx + dy * dy + dz * dz + eps2;
+        const pull = G * b.mass / (d2 * Math.sqrt(d2));
+        gx += dx * pull;
+        gy += dy * pull;
+        gz += dz * pull;
+    }
+    return { x: gx, y: gy, z: gz };
+}
+
+// Distance from (x, y, z) to whichever of `heavy` pulls hardest there
+function distanceToStrongest(x, y, z, heavy) {
+    let best = Infinity;
+    let bestPull = 0;
+    for (const b of heavy) {
+        const d2 = (b.x - x) ** 2 + (b.y - y) ** 2 + (b.z - z) ** 2;
+        const pull = b.mass / (d2 + 1);
+        if (pull > bestPull) {
+            bestPull = pull;
+            best = Math.sqrt(d2);
+        }
+    }
+    return best;
+}
 
 // The level at a point between grid points (blending the four around it)
 function fieldLevelAt(levels, points, gx, gy) {
@@ -2908,23 +2966,146 @@ function updateField() {
 
     paintField(points);
 
-    // Shape the surface: flat for the contour map, pushed down for the sheet
+    // Shape the surface: flat for the contour map, pushed down for the
+    // rubber sheet, pushed the way gravity pulls for the pull sheet
     const corners = SHEET_CELLS + 1;
     const position = field.geometry.attributes.position;
-    const depthPerLevel = mode === "sheet" ? size * 0.025 : 0;
+    const depthPerLevel = mode === "map" ? 0 : size * 0.025;
     const scale = (points - 1) / SHEET_CELLS; // grid points per sheet square
+    // The heaviest bodies, to make sure the pull sheet never reaches past one
+    const heavy = mode === "pull" ? menuBodies() : null;
+
     for (let row = 0; row < corners; row++) {
         for (let col = 0; col < corners; col++) {
-            const level = fieldLevelAt(levels, points, col * scale, row * scale);
-            position.setXYZ(row * corners + col,
-                left + col * size / SHEET_CELLS,
-                bottom + row * size / SHEET_CELLS,
-                planeZ - (level - lowest) * depthPerLevel);
+            const x = left + col * size / SHEET_CELLS;
+            const y = bottom + row * size / SHEET_CELLS;
+            const depth = (fieldLevelAt(levels, points, col * scale, row * scale) - lowest) * depthPerLevel;
+
+            if (mode === "pull") {
+                const g = gravityAt(x, y, planeZ, eps2, useTreeForField);
+                const strength = Math.hypot(g.x, g.y, g.z);
+                // Same depth as the rubber sheet, but along the pull, and
+                // stopping short of the body doing the pulling
+                const reach = strength > 0 ? Math.min(depth, 0.8 * distanceToStrongest(x, y, planeZ, heavy)) / strength : 0;
+                position.setXYZ(row * corners + col, x + g.x * reach, y + g.y * reach, planeZ + g.z * reach);
+            } else {
+                position.setXYZ(row * corners + col, x, y, planeZ - depth);
+            }
         }
     }
     position.needsUpdate = true;
-    field.lines.visible = mode === "sheet";
+    field.lines.visible = mode !== "map";
     field.ready = true;
+}
+
+// ---------- Gravity arrows ----------
+
+/*
+ * A 3D lattice of arrows around the point the camera looks at, each one
+ * pointing the way gravity pulls there (the field g, from gravityAt).
+ * Unlike the sheets, this shows the pull from every side at once: above a
+ * planet the arrows point down at it, below it they point up.
+ * Longer and brighter = stronger. Gravity's strength covers a huge range
+ * (it falls as 1 / r^2), so lengths use a logarithmic scale: the full length
+ * covers a strength range of 1,000 times.
+ * All the arrows are one "instanced" shape, drawn in a single call.
+ */
+const ARROWS_ACROSS = 9;  // arrows along x and along y
+const ARROW_LAYERS = 5;   // layers stacked up in z
+const ARROW_COUNT = ARROWS_ACROSS * ARROWS_ACROSS * ARROW_LAYERS;
+
+// One arrow, from its tail (0) to its point (1) along +y: a thin shaft plus
+// a cone for the head, joined into one shape by putting their triangles together
+const arrowShape = (() => {
+    const shaft = new THREE.CylinderGeometry(0.018, 0.018, 0.72, 6).translate(0, 0.36, 0).toNonIndexed();
+    const head = new THREE.ConeGeometry(0.07, 0.28, 8).translate(0, 0.86, 0).toNonIndexed();
+    const a = shaft.attributes.position.array;
+    const b = head.attributes.position.array;
+    const joined = new Float32Array(a.length + b.length);
+    joined.set(a);
+    joined.set(b, a.length);
+    const shape = new THREE.BufferGeometry();
+    shape.setAttribute("position", new THREE.BufferAttribute(joined, 3));
+    return shape;
+})();
+const arrows = new THREE.InstancedMesh(arrowShape, new THREE.MeshBasicMaterial({
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+}), ARROW_COUNT);
+arrows.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+arrows.setColorAt(0, new THREE.Color()); // gives every arrow its own colour
+arrows.frustumCulled = false;
+arrows.visible = false;
+scene.add(arrows);
+
+const POINTING_UP = new THREE.Vector3(0, 1, 0);
+const WEAK_ARROW = new THREE.Color(0.2, 0.3, 0.6);
+const STRONG_ARROW = new THREE.Color(1, 0.75, 0.35);
+
+function updateArrows() {
+    arrows.visible = options.fieldArrows && bodies.length > 0;
+    if (!arrows.visible) {
+        arrows.userData.ready = false;
+        return;
+    }
+    const useTree = bodies.length > FIELD_TREE_LIMIT;
+    if (useTree && arrows.userData.ready && frameCount % 3 !== 0) return;
+    if (useTree) buildTree(bodies);
+
+    // Spaced to suit the zoom, and snapped so they don't slide as the view
+    // pans. Layers are closer together in z, so the top layer stays well
+    // below the camera.
+    const spacing = camera.distance * 0.16;
+    const layerSpacing = spacing * 0.6;
+    const centerX = Math.round(camera.x / spacing) * spacing;
+    const centerY = Math.round(camera.y / spacing) * spacing;
+    const centerZ = Math.round(camera.z / layerSpacing) * layerSpacing;
+    const halfAcross = (ARROWS_ACROSS - 1) / 2;
+    const halfUp = (ARROW_LAYERS - 1) / 2;
+
+    // First work out every arrow's pull, to find the strongest
+    const samples = [];
+    let strongest = 0;
+    for (let k = 0; k < ARROW_LAYERS; k++) {
+        for (let j = 0; j < ARROWS_ACROSS; j++) {
+            for (let i = 0; i < ARROWS_ACROSS; i++) {
+                const p = {
+                    x: centerX + (i - halfAcross) * spacing,
+                    y: centerY + (j - halfAcross) * spacing,
+                    z: centerZ + (k - halfUp) * layerSpacing
+                };
+                const g = gravityAt(p.x, p.y, p.z, 15 * 15, useTree);
+                const strength = Math.hypot(g.x, g.y, g.z);
+                // Arrows further from the middle are fainter
+                const edge = Math.hypot((i - halfAcross) / halfAcross, (j - halfAcross) / halfAcross, (k - halfUp) / Math.max(halfUp, 1));
+                samples.push({ p, g, strength, fade: 1 - 0.8 * Math.min(edge / 1.7, 1) });
+                if (strength > strongest) strongest = strength;
+            }
+        }
+    }
+
+    const matrix = new THREE.Matrix4();
+    const turn = new THREE.Quaternion();
+    const color = new THREE.Color();
+    const direction = new THREE.Vector3();
+    samples.forEach(({ p, g, strength, fade }, n) => {
+        // 0 = 1,000 times weaker than the strongest, 1 = the strongest
+        const t = strength > 0 ? clamp(Math.log(strength / strongest * 1000) / Math.log(1000), 0, 1) : 0;
+        const length = t > 0 ? spacing * (0.2 + 0.5 * t) : 0;
+        direction.set(g.x, g.y, g.z).normalize();
+        turn.setFromUnitVectors(POINTING_UP, direction);
+        // Centre each arrow on its lattice point
+        matrix.compose(
+            new THREE.Vector3(p.x - direction.x * length / 2, p.y - direction.y * length / 2, p.z - direction.z * length / 2),
+            turn,
+            new THREE.Vector3(length, length, length)
+        );
+        arrows.setMatrixAt(n, matrix);
+        color.copy(WEAK_ARROW).lerp(STRONG_ARROW, t).multiplyScalar(fade * (0.3 + 0.6 * t));
+        arrows.setColorAt(n, color);
+    });
+    arrows.instanceMatrix.needsUpdate = true;
+    arrows.instanceColor.needsUpdate = true;
+    arrows.userData.ready = true;
 }
 
 // ---------- Barnes-Hut tree view ----------
@@ -3323,6 +3504,7 @@ function render() {
     updateView();
 
     // The background stars sit on a huge ball around the camera
+    starfield.visible = options.stars;
     starfield.position.copy(view.position);
     starfield.scale.setScalar(view.far * 0.8);
 
@@ -3335,6 +3517,7 @@ function render() {
     updateGrid();
     updateHeightLines();
     updateField();
+    updateArrows();
     updateTreeOverlay();
     updatePlacement();
 
@@ -3876,11 +4059,132 @@ function togglePlay() {
     updatePlayButton();
 }
 
+// ---------- Undo and redo ----------
+
+/*
+ * Before every edit (placing, deleting or moving a body, changing its mass,
+ * size or velocity, "Make it orbit", Reset, switching scenario) the whole
+ * system is saved as a "snapshot". Undo puts the last snapshot back, which
+ * also rewinds time to just before that edit; Redo goes forward again.
+ * Time passing on its own isn't an edit, so it's never undone by itself.
+ */
+const UNDO_LIMIT = 30;
+const undoStack = [];
+const redoStack = [];
+
+function takeSnapshot(label) {
+    return {
+        label,
+        // Copies of every body (trails aren't kept: time jumps on undo anyway)
+        bodies: bodies.map(b => ({ ...b, trail: [] })),
+        scenario: currentScenario,
+        timeStep,
+        softening,
+        simTime,
+        nextId,
+        typeCounters: { ...typeCounters },
+        selectedId: selectedBody ? selectedBody.id : null,
+        referenceId
+    };
+}
+
+// Call just BEFORE changing the system. `label` says what's about to happen,
+// e.g. "delete Rosa", for the Undo button's tooltip.
+function saveUndo(label) {
+    undoStack.push(takeSnapshot(label));
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack.length = 0; // a new edit replaces anything that could be redone
+    refreshUndoButtons();
+}
+
+// For sliders and number boxes: a whole drag or typing session is one undo step
+function saveUndoForEdit(label) {
+    if (editState.sources.size > 0) {
+        if (editState.undoSaved) return;
+        editState.undoSaved = true;
+    }
+    saveUndo(label);
+}
+
+function restoreSnapshot(snapshot) {
+    cancelPointer();
+    const followedId = camera.follow === "body" && camera.followed ? camera.followed.id : null;
+
+    bodies = snapshot.bodies.map(b => ({ ...b, trail: [] }));
+    timeStep = snapshot.timeStep;
+    softening = snapshot.softening;
+    simTime = snapshot.simTime;
+    nextId = snapshot.nextId;
+    typeCounters = { ...snapshot.typeCounters };
+    referenceId = snapshot.referenceId;
+    selectedBody = bodies.find(b => b.id === snapshot.selectedId) ?? null;
+    // Keep following the same body if it exists in the restored system
+    if (followedId !== null) camera.followed = bodies.find(b => b.id === followedId) ?? null;
+
+    if (snapshot.scenario !== currentScenario) {
+        currentScenario = snapshot.scenario;
+        showScenarioInfo(currentScenario);
+    }
+
+    stepAccumulator = 0;
+    effects = [];
+    energyHistory = [];
+    markSystemChanged();
+    refreshBodyList();
+    updateProperties();
+}
+
+function undo() {
+    const snapshot = undoStack.pop();
+    if (!snapshot) return;
+    redoStack.push(takeSnapshot(snapshot.label));
+    restoreSnapshot(snapshot);
+    refreshUndoButtons();
+    showToast("Undone: " + snapshot.label);
+}
+
+function redo() {
+    const snapshot = redoStack.pop();
+    if (!snapshot) return;
+    undoStack.push(takeSnapshot(snapshot.label));
+    restoreSnapshot(snapshot);
+    refreshUndoButtons();
+    showToast("Redone: " + snapshot.label);
+}
+
+function refreshUndoButtons() {
+    const undoBtn = document.getElementById("undoBtn");
+    const redoBtn = document.getElementById("redoBtn");
+    const lastUndo = undoStack[undoStack.length - 1];
+    const lastRedo = redoStack[redoStack.length - 1];
+    undoBtn.disabled = !lastUndo;
+    redoBtn.disabled = !lastRedo;
+    undoBtn.title = lastUndo ? "Undo: " + lastUndo.label + " (Ctrl+Z)" : "Nothing to undo";
+    redoBtn.title = lastRedo ? "Redo: " + lastRedo.label + " (Ctrl+Shift+Z)" : "Nothing to redo";
+}
+
+// A short message in the middle of the canvas, fading after a moment
+let toastTimer = null;
+function showToast(text) {
+    const toast = document.getElementById("toast");
+    toast.textContent = text;
+    toast.classList.add("visible");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove("visible"), 1600);
+}
+
+// Load a scenario as an edit that can be undone (Reset, or picking another one)
+function startScenario(name, label) {
+    saveUndo(label);
+    loadScenario(name);
+}
+
 // ---------- Auto-pause while editing ----------
 
 function beginEdit(source) {
     if (editState.sources.size === 0) {
         editState.target = selectedBody;
+        editState.undoSaved = false;
         if (options.autoPause && running) {
             running = false;
             editState.pausedByEdit = true;
@@ -3940,6 +4244,10 @@ function setTool(name) {
 
 function updateHint() {
     const hint = document.getElementById("canvasHint");
+    // The View controls tab says which tool is on, even when it's closed
+    document.getElementById("toolBadge").textContent =
+        brush ? " · Placing " + BODY_TYPES[brush].label.toLowerCase()
+        : tool === "move" ? " · Move tool" : "";
     if (brush) {
         hint.innerHTML =
             "<b>Drag</b> on the grid to throw a " + BODY_TYPES[brush].label.toLowerCase() + " &middot; " +
@@ -3972,6 +4280,7 @@ function updateCursor(hovering = false) {
 
 function deleteSelected() {
     if (!selectedBody) return;
+    saveUndo("delete " + selectedBody.name);
     if (camera.followed === selectedBody) setCameraFollow("free");
     if (referenceId === selectedBody.id) referenceId = null;
     bodies = bodies.filter(b => b !== selectedBody);
@@ -4148,6 +4457,7 @@ canvas.addEventListener("pointermove", event => {
         if (pointer.mode === "pan") setCameraFollow("free");
         // Gravity can't act normally on a body held by the mouse, so the
         // simulation waits while you drag, then carries on
+        if (pointer.mode === "drag") saveUndo("move " + pointer.body.name);
         if (pointer.mode === "drag" && running) {
             running = false;
             pointer.resume = true;
@@ -4191,6 +4501,7 @@ canvas.addEventListener("pointerup", event => {
     }
 
     if (pointer && pointer.mode === "place") {
+        saveUndo("place a " + BODY_TYPES[brush].label.toLowerCase());
         const velocity = placementVelocity(pointer);
         const body = createBody({
             type: brush,
@@ -4227,7 +4538,9 @@ canvas.addEventListener("wheel", event => {
 
 document.getElementById("playPauseBtn").onclick = togglePlay;
 
-document.getElementById("resetBtn").onclick = () => loadScenario(currentScenario);
+document.getElementById("resetBtn").onclick = () => startScenario(currentScenario, "reset");
+document.getElementById("undoBtn").onclick = undo;
+document.getElementById("redoBtn").onclick = redo;
 
 document.getElementById("clearTrailsBtn").onclick = () => {
     for (const b of bodies) b.trail = [];
@@ -4236,7 +4549,7 @@ document.getElementById("clearTrailsBtn").onclick = () => {
 document.getElementById("centerViewBtn").onclick = () => fitView();
 
 document.getElementById("scenarioSelect").onchange = event => {
-    loadScenario(event.target.value);
+    startScenario(event.target.value, "switch to " + event.target.selectedOptions[0].textContent);
     event.target.blur();
 };
 
@@ -4295,6 +4608,8 @@ const toggles = {
     vectorToggle: "vectors",
     orbitToggle: "orbit",
     gridToggle: "grid",
+    starsToggle: "stars",
+    arrowsToggle: "fieldArrows",
     spinToggle: "spinView",
     mergeToggle: "merge",
     labelToggle: "labels"
@@ -4338,6 +4653,7 @@ const MIN_RADIUS = 1;
 const MAX_RADIUS = 60;
 
 function setMass(body, mass, from) {
+    saveUndoForEdit("change the mass of " + body.name);
     body.mass = clamp(mass, MIN_MASS, MAX_MASS);
     if (from !== "slider") massSlider.value = sliderFromMass(body.mass);
     if (from !== "box") massInput.value = formatNumber(body.mass);
@@ -4346,6 +4662,7 @@ function setMass(body, mass, from) {
 }
 
 function setRadius(body, radius, from) {
+    saveUndoForEdit("change the radius of " + body.name);
     body.radius = clamp(radius, MIN_RADIUS, MAX_RADIUS);
     if (from !== "slider") radiusSlider.value = body.radius;
     if (from !== "box") radiusInput.value = formatNumber(body.radius);
@@ -4395,6 +4712,7 @@ for (const axis of ["x", "y", "z"]) {
         if (!body || event.target.value === "" || !Number.isFinite(value)) return;
         const position = { x: body.x, y: body.y, z: body.z };
         position[axis] = value;
+        saveUndoForEdit("move " + body.name);
         moveBody(body, position.x, position.y, position.z);
     });
 }
@@ -4404,6 +4722,7 @@ for (const axis of ["x", "y", "z"]) {
         const body = editableBody();
         const value = Number(event.target.value);
         if (!body || event.target.value === "" || !Number.isFinite(value)) return;
+        saveUndoForEdit("change the velocity of " + body.name);
         body["v" + axis] = value;
         markSystemChanged();
     });
@@ -4450,6 +4769,7 @@ document.getElementById("orbitBtn").onclick = () => {
     if (!selectedBody) return;
     const attractor = referenceBody(selectedBody);
     if (!attractor) return;
+    saveUndo("make " + selectedBody.name + " orbit");
     const direction = document.getElementById("orbitDirection").value;
     const v = circularVelocity(selectedBody, selectedBody.mass, attractor,
         direction === "anticlockwise" ? ANTICLOCKWISE : CLOCKWISE);
@@ -4467,6 +4787,50 @@ document.addEventListener("click", event => {
     const button = event.target.closest("button");
     if (button) button.blur();
 });
+
+// ---------- Panels on the canvas ----------
+
+/*
+ * The Scenario and View controls panels fold away to a small labeled tab.
+ * The arrow on the tab points the way the panel will go when clicked.
+ * Whether View controls is open is remembered in this browser (if it allows).
+ */
+function setPanelOpen(panel, open) {
+    panel.classList.toggle("collapsed", !open);
+    const tab = panel.querySelector(".canvas-panel-tab");
+    tab.setAttribute("aria-expanded", String(open));
+    const opensUp = panel.classList.contains("opens-up");
+    tab.querySelector(".chevron").textContent = open === opensUp ? "\u25BE" : "\u25B4"; // ▾ or ▴
+}
+
+const CONTROLS_OPEN_KEY = "gravitylab.controlsOpen";
+
+for (const panel of document.querySelectorAll(".canvas-panel")) {
+    panel.querySelector(".canvas-panel-tab").addEventListener("click", () => {
+        const open = panel.classList.contains("collapsed");
+        setPanelOpen(panel, open);
+        if (panel.id === "controlsPanel") {
+            try {
+                localStorage.setItem(CONTROLS_OPEN_KEY, open ? "1" : "0");
+            } catch (error) {
+                // storage not available (private window etc.): just don't remember
+            }
+        }
+    });
+}
+
+// View controls start open on big screens and closed on phones, unless the
+// visitor chose before
+(() => {
+    let saved = null;
+    try {
+        saved = localStorage.getItem(CONTROLS_OPEN_KEY);
+    } catch (error) {
+        // storage not available
+    }
+    setPanelOpen(document.getElementById("controlsPanel"),
+        saved === null ? window.innerWidth > 600 : saved === "1");
+})();
 
 // ---------- Keyboard shortcuts ----------
 
@@ -4505,9 +4869,25 @@ document.getElementById("navFit").onclick = () => fitView();
 
 window.addEventListener("keydown", event => {
     const target = event.target;
+    // Typing in a box or using a menu: leave the keys alone
     const typing = target.tagName === "SELECT" ||
-        (target.tagName === "INPUT" && (target.type === "number" || target.type === "range"));
+        (target.tagName === "INPUT" && target.type === "number");
     if (typing) return;
+    // A slider uses the arrow keys (and Page Up/Down, Home, End) itself;
+    // every other shortcut still works after dragging one
+    const sliderKey = event.key.startsWith("Arrow") || ["PageUp", "PageDown", "Home", "End"].includes(event.key);
+    if (target.tagName === "INPUT" && target.type === "range" && sliderKey) return;
+
+    // Ctrl+Z undo; Ctrl+Shift+Z or Ctrl+Y redo (Cmd instead of Ctrl on a Mac)
+    if (event.ctrlKey || event.metaKey) {
+        const key = event.key.toLowerCase();
+        if (key === "z" || key === "y") {
+            event.preventDefault();
+            if (key === "y" || event.shiftKey) redo();
+            else undo();
+        }
+        return;
+    }
 
     // W A S D slide the view, Q / Z move it up and down, for as long as they're held
     const move = MOVE_KEYS[event.key.toLowerCase()];
@@ -4539,7 +4919,7 @@ window.addEventListener("keydown", event => {
     } else if (event.key === "t" || event.key === "T") {
         toggleTopView();
     } else if (event.key === "r" || event.key === "R") {
-        loadScenario(currentScenario);
+        startScenario(currentScenario, "reset");
     } else if (event.key === "f" || event.key === "F") {
         fitView();
     } else if (event.key === "e" || event.key === "E") {
