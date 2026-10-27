@@ -4713,18 +4713,102 @@ const toggles = {
     labelToggle: "labels"
 };
 
+// ---------- Options menu (saved in this browser) ----------
+
+/*
+ * The checkboxes live in the Options menu in the top bar. Choices are saved
+ * in this browser (if it allows), so they're the same next visit;
+ * "Reset to defaults" goes back to how the page first starts.
+ */
+const OPTIONS_KEY = "gravitylab.options";
+const DEFAULT_OPTIONS = { ...options };
+const optionsBtn = document.getElementById("optionsBtn");
+const optionsPanel = document.getElementById("optionsPanel");
+
+// Make the checkboxes and legends match `options`
+function showOptions() {
+    for (const [id, key] of Object.entries(toggles)) document.getElementById(id).checked = options[key];
+    document.getElementById("vectorLegend").classList.toggle("hidden", !options.vectors);
+    document.getElementById("treeLegend").classList.toggle("hidden", !options.tree);
+}
+
+function saveOptions() {
+    const saved = {};
+    for (const key of Object.values(toggles)) saved[key] = options[key];
+    try {
+        localStorage.setItem(OPTIONS_KEY, JSON.stringify(saved));
+    } catch (error) {
+        // storage not available (private window etc.): just don't remember
+    }
+}
+
+function loadOptions() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(OPTIONS_KEY));
+        for (const key of Object.values(toggles)) {
+            if (saved && typeof saved[key] === "boolean") options[key] = saved[key];
+        }
+    } catch (error) {
+        // nothing saved, or storage not available
+    }
+    showOptions();
+}
+
 for (const [id, key] of Object.entries(toggles)) {
     document.getElementById(id).onchange = event => {
         options[key] = event.target.checked;
-        if (key === "vectors") {
-            document.getElementById("vectorLegend").classList.toggle("hidden", !options.vectors);
-        }
-        if (key === "tree") {
-            document.getElementById("treeLegend").classList.toggle("hidden", !options.tree);
-        }
-        event.target.blur();
+        showOptions();
+        saveOptions();
+        event.target.blur(); // so Space still means play / pause
     };
 }
+
+document.getElementById("resetOptionsBtn").onclick = () => {
+    for (const key of Object.values(toggles)) options[key] = DEFAULT_OPTIONS[key];
+    showOptions();
+    saveOptions();
+};
+
+function setOptionsOpen(open) {
+    optionsPanel.classList.toggle("hidden", !open);
+    optionsBtn.setAttribute("aria-expanded", String(open));
+}
+
+optionsBtn.addEventListener("click", () => setOptionsOpen(optionsPanel.classList.contains("hidden")));
+document.getElementById("closeOptionsBtn").addEventListener("click", () => setOptionsOpen(false));
+
+// Clicking anywhere outside the menu closes it
+document.addEventListener("pointerdown", event => {
+    if (!optionsPanel.classList.contains("hidden") && !event.target.closest(".options-menu")) {
+        setOptionsOpen(false);
+    }
+});
+
+loadOptions();
+
+// ---------- Side panel sections that fold away ----------
+
+// Which sections are folded is remembered in this browser, like the options
+const FOLDED_KEY = "gravitylab.foldedSections";
+(() => {
+    let folded = [];
+    try {
+        folded = JSON.parse(localStorage.getItem(FOLDED_KEY)) || [];
+    } catch (error) {
+        // nothing saved
+    }
+    for (const section of document.querySelectorAll(".foldable")) {
+        if (folded.includes(section.id)) section.open = false;
+        section.addEventListener("toggle", () => {
+            const closed = [...document.querySelectorAll(".foldable:not([open])")].map(s => s.id);
+            try {
+                localStorage.setItem(FOLDED_KEY, JSON.stringify(closed));
+            } catch (error) {
+                // storage not available
+            }
+        });
+    }
+})();
 
 document.querySelectorAll(".brush").forEach(btn => {
     btn.onclick = () => setTool(btn.dataset.type);
@@ -5008,6 +5092,9 @@ window.addEventListener("keydown", event => {
         togglePlay();
     } else if (event.key === "Delete" || event.key === "Backspace") {
         deleteSelected();
+    } else if (event.key === "Escape" && !optionsPanel.classList.contains("hidden")) {
+        // Esc closes the Options menu first
+        setOptionsOpen(false);
     } else if (event.key === "Escape") {
         cancelPointer();
         setTool("observe");
