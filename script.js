@@ -727,6 +727,31 @@ function computeForcesTree(list, isMain) {
         }
     }
 
+    /*
+     * Barnes-Hut pulls aren't exactly equal and opposite: a far cube pulls on
+     * a body, but the body doesn't pull back on the cube in exactly the same
+     * way. Left alone, the tiny leftover would slowly push the whole system
+     * sideways (measured: the galaxies drift by 0.2% of their speed in 300
+     * steps). Real forces inside a system always add up to zero (Newton's 3rd
+     * law), so take the leftover total off every body equally: momentum then
+     * stays exactly constant. Each pull changes by far less than the
+     * Barnes-Hut error itself.
+     */
+    let fx = 0, fy = 0, fz = 0, totalMass = 0;
+    for (const b of list) {
+        fx += b.mass * b.ax;
+        fy += b.mass * b.ay;
+        fz += b.mass * b.az;
+        totalMass += b.mass;
+    }
+    if (totalMass > 0) {
+        for (const b of list) {
+            b.ax -= fx / totalMass;
+            b.ay -= fy / totalMass;
+            b.az -= fz / totalMass;
+        }
+    }
+
     if (isMain) {
         solverStats.method = "bh";
         solverStats.n = list.length;
@@ -1718,7 +1743,7 @@ const SCENARIOS = {
                     radius: 1.2 + random() * 1.6,
                     color: asteroidColors[i % asteroidColors.length],
                     collisionless: true
-                }, (tilts() - 0.5) * 14, tilts() * 360);  // real belt asteroids: tilted by up to ~10 degrees
+                }, (tilts() - 0.5) * 14, tilts() * 360);  // tilted up to 7 degrees (real ones: mostly under ~20)
             }
 
             // A comet's path can cross the planets', so it might hit one.
@@ -3920,16 +3945,19 @@ function equationCardsHtml(b, other) {
         const otherName = escapeHtml(other.name);
 
         html += eqCard("Newton's law of gravity",
-            eqLine("<i>F</i> = " + frac("<i>G</i> · <i>M</i> · <i>m</i>", "<i>r</i>² + <i>ε</i>²")) +
-            eqSub("= " + frac(G + " × " + num("M") + " × " + num("m"), num("r") + "² + " + num("eps") + "²") +
+            eqLine("<i>F</i> = " + frac("<i>G</i> · <i>M</i> · <i>m</i>", "<i>r</i>²")) +
+            eqSub("= " + frac(G + " × " + num("M") + " × " + num("m"), num("r") + "²") +
                 " = " + num("F", true)) +
             eqNote("The pull between " + name + " (mass <i>m</i>) and " + otherName +
-                " (mass <i>M</i>), a distance <i>r</i> apart. <i>G</i> = 1 in simulation units. " +
-                "<i>ε</i> is softening (How it works §4); real gravity has <i>ε</i> = 0."));
+                " (mass <i>M</i>), a distance <i>r</i> apart. <i>G</i> = 1 in simulation units.") +
+            eqRow("Softened, as the simulation uses it", num("Fsoft")) +
+            eqNote("The simulation uses <i>F</i> = <i>G·M·m·r</i> / (<i>r</i>² + <i>ε</i>²)<sup>3/2</sup> " +
+                "with <i>ε</i> = " + num("eps") + ", so very close passes don't give infinite kicks " +
+                "(How it works §4). Far away (<i>r</i> much bigger than <i>ε</i>) it's the same as Newton's."));
 
         html += eqCard("Acceleration: Newton's 2nd law",
             eqLine("<i>a</i> = " + frac("<i>F</i>", "<i>m</i>") + " = " +
-                frac("<i>G</i> · <i>M</i>", "<i>r</i>² + <i>ε</i>²")) +
+                frac("<i>G</i> · <i>M</i>", "<i>r</i>²")) +
             eqSub("= " + frac(num("F"), num("m")) + " = " + num("aOther", true)) +
             eqNote("<i>m</i> cancels out, so a pebble and a planet in the same spot fall exactly the same way.") +
             eqRow("All " + num("n") + " bodies together", "|<i>a</i>| = " + num("aNet")) +
@@ -3963,9 +3991,10 @@ function equationCardsHtml(b, other) {
         const otherName = escapeHtml(other.name);
 
         html += eqCard("Gravitational potential energy",
-            eqLine("<i>U</i> = −" + frac("<i>G</i> · <i>M</i> · <i>m</i>", "√(<i>r</i>² + <i>ε</i>²)")) +
-            eqSub("= −" + frac(G + " × " + num("M") + " × " + num("m"), "√(" + num("r") + "² + " + num("eps") + "²)") +
+            eqLine("<i>U</i> = −" + frac("<i>G</i> · <i>M</i> · <i>m</i>", "<i>r</i>")) +
+            eqSub("= −" + frac(G + " × " + num("M") + " × " + num("m"), num("r")) +
                 " = " + num("Upair", true)) +
+            eqRow("Softened: −<i>G·M·m</i> / √(<i>r</i>² + <i>ε</i>²)", num("Usoft")) +
             eqRow("With every body: <i>U</i> = <i>m</i> · <i>φ</i>", num("U")) +
             eqNote("Negative, because you'd have to <em>add</em> energy to pull them apart. " +
                 "<i>φ</i> is the gravitational potential here: how deep in the well it sits (Gravity field view)."));
@@ -3990,7 +4019,10 @@ function equationCardsHtml(b, other) {
             eqRow("One lap in real time", num("realTime")) +
             eqNote("<i>a</i> is the semi-major axis, half the orbit's longest width. " +
                 "<i>T</i>² grows like <i>a</i>³, so an orbit twice as big takes 2.8× as long. " +
-                "The dashed ellipse on the canvas is this predicted orbit."));
+                "The dashed ellipse on the canvas is this predicted orbit.") +
+            eqNote("Kepler's laws are exact for real gravity (<i>ε</i> = 0). With softening, orbits " +
+                "that dive close to the other body take slightly longer: about 1.5% for one that " +
+                "comes within 80 when <i>ε</i> = 5."));
     }
 
     html += eqCard("Whole system (" + num("n") + " bodies)",
@@ -4040,9 +4072,11 @@ function equationValues(b, other) {
     });
     if (!other) return values;
 
+    // Newton's textbook values use r; the "softened" ones are exactly what
+    // the simulation computes (see computeForcesDirect)
     const r = Math.hypot(other.x - b.x, other.y - b.y, other.z - b.z);
     const softened = r * r + softening * softening;
-    const force = G * other.mass * b.mass / softened;
+    const force = G * other.mass * b.mass / (r * r);
     const orbit = orbitAround(b, other);
 
     Object.assign(values, {
@@ -4050,9 +4084,11 @@ function equationValues(b, other) {
         r,
         eps: softening,
         F: force,
+        Fsoft: G * other.mass * b.mass * r / (softened * Math.sqrt(softened)),
         aOther: force / b.mass,
         aBack: force / other.mass,
-        Upair: -G * other.mass * b.mass / Math.sqrt(softened),
+        Upair: -G * other.mass * b.mass / r,
+        Usoft: -G * other.mass * b.mass / Math.sqrt(softened),
         vRel: orbit.v,
         vCirc: orbit.circularSpeed,
         vEsc: orbit.escapeSpeed,
@@ -4062,7 +4098,9 @@ function equationValues(b, other) {
     });
 
     if (orbit.bound) {
-        const seconds = orbit.period / timeStep / (STEPS_PER_SECOND * simulationSpeed);
+        // Steps per lap, divided by steps per second (on a slow computer
+        // the simulation manages only `speedRatio` of the speed asked for)
+        const seconds = orbit.period / timeStep / (STEPS_PER_SECOND * simulationSpeed * Math.min(1, speedRatio));
         Object.assign(values, {
             axis: orbit.a,
             period: orbit.period,
