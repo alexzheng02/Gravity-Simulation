@@ -741,8 +741,11 @@ function leafOfBody(i) {
  * energy error stays small and bounded instead of building up.
  * Needs accelerations to already be correct for the current positions.
  */
+// A body held by the mouse (`held`, see the Move tool) stays where it's held
+// and keeps its velocity, but still pulls on everything else.
 function stepVerlet(list, dt, isMain = false) {
     for (const b of list) {
+        if (b.held) continue;
         b.vx += b.ax * dt / 2;
         b.vy += b.ay * dt / 2;
         b.vz += b.az * dt / 2;
@@ -754,6 +757,7 @@ function stepVerlet(list, dt, isMain = false) {
     computeForces(list, isMain);
 
     for (const b of list) {
+        if (b.held) continue;
         b.vx += b.ax * dt / 2;
         b.vy += b.ay * dt / 2;
         b.vz += b.az * dt / 2;
@@ -770,6 +774,7 @@ function stepVerlet(list, dt, isMain = false) {
  */
 function stepEuler(list, dt) {
     for (const b of list) {
+        if (b.held) continue;
         b.x += b.vx * dt;
         b.y += b.vy * dt;
         b.z += b.vz * dt;
@@ -3774,9 +3779,10 @@ function refreshLiveReadouts(force = false) {
     const integratorName = integrator === "verlet" ? "Velocity Verlet" : "Euler";
     const solverName = solverStats.method === "bh" ? "Barnes-Hut" : "Direct";
     const pauseText = running ? ""
-        : editState.pausedByEdit ? "PAUSED while editing · "
-        : pointer && pointer.mode === "drag" && pointer.resume ? "PAUSED while moving a body · "
-        : "PAUSED · ";
+        : !editState.pausedByEdit ? "PAUSED · "
+        : pointer && pointer.mode === "drag" ? "PAUSED while moving a body · "
+        : pointer && pointer.mode === "place" ? "PAUSED while placing · "
+        : "PAUSED while editing · ";
     const slowText = running && speedRatio < 0.85
         ? " (computer keeping up at " + (simulationSpeed * speedRatio).toFixed(1) + "x)"
         : "";
@@ -4237,7 +4243,7 @@ function setTool(name) {
         btn.classList.toggle("active", btn.dataset.type === tool);
     });
 
-    if (pointer && pointer.mode === "place") pointer = null;
+    if (pointer && pointer.mode === "place") cancelPointer();
     updateCursor();
     updateHint();
 }
@@ -4336,16 +4342,22 @@ function moveBody(body, x, y, z) {
 // Let go of whatever the mouse was doing (placing, rotating, panning or dragging)
 function cancelPointer() {
     if (pointer && pointer.mode === "drag") finishDrag();
+    if (pointer && pointer.mode === "place") endEdit("place");
     pointer = null;
     updateCursor();
 }
 
-// Dragging a body pauses the simulation; carry on once it's let go
+/*
+ * Placing a body and dragging one with the Move tool count as editing, like
+ * the sliders: with "Auto-pause while editing" on, the simulation waits
+ * until you let go. With it off, everything keeps moving, and a dragged body
+ * is held still under the mouse (see stepVerlet), keeping its velocity.
+ */
 function finishDrag() {
-    if (pointer.resume && !running) {
-        running = true;
-        updatePlayButton();
-    }
+    if (!pointer.moved) return;
+    pointer.body.held = false;
+    markSystemChanged(); // holding a body pushed on the system, so measure energy afresh
+    endEdit("drag");
 }
 
 // ---------- Mouse / touch on the canvas ----------
@@ -4403,7 +4415,7 @@ canvas.addEventListener("pointerdown", event => {
             selectBody(hit);
             pointer = {
                 mode: "drag", body: hit, normal: workingNormal(),
-                startScreen: screen, lastScreen: screen, moved: false, resume: false
+                startScreen: screen, lastScreen: screen, moved: false
             };
         } else if (hit && brush) {
             selectBody(hit);
@@ -4414,6 +4426,7 @@ canvas.addEventListener("pointerdown", event => {
             const start = screenToPlane(screen.x, screen.y, cameraFocus(), normal);
             if (!start) return;
             pointer = { mode: "place", start, current: start, normal, startScreen: screen, currentScreen: screen };
+            beginEdit("place");
         } else {
             pointer = { mode: "rotate", startScreen: screen, lastScreen: screen, moved: false, clicked: hit };
         }
@@ -4455,13 +4468,10 @@ canvas.addEventListener("pointermove", event => {
         if (Math.hypot(screen.x - pointer.startScreen.x, screen.y - pointer.startScreen.y) < 4) return;
         pointer.moved = true;
         if (pointer.mode === "pan") setCameraFollow("free");
-        // Gravity can't act normally on a body held by the mouse, so the
-        // simulation waits while you drag, then carries on
-        if (pointer.mode === "drag") saveUndo("move " + pointer.body.name);
-        if (pointer.mode === "drag" && running) {
-            running = false;
-            pointer.resume = true;
-            updatePlayButton();
+        if (pointer.mode === "drag") {
+            saveUndo("move " + pointer.body.name);
+            pointer.body.held = true;
+            beginEdit("drag");
         }
         updateCursor();
     }
@@ -4972,6 +4982,9 @@ function frame(now) {
         if (done > 0) {
             recordTrails();
             recordEnergy();
+            // A body held by the mouse isn't free, so energy isn't conserved
+            // while it's held: start measuring the drift again after it's let go
+            if (pointer && pointer.mode === "drag" && pointer.body.held) energyBaseline = null;
         }
     }
 

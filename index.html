@@ -198,7 +198,7 @@
             </label>
 
             <div class="toggles">
-                <label title="Pauses the simulation while you drag a slider or type in a box, then resumes">
+                <label title="Pauses while you place or move a body, drag a slider or type in a box, then carries on. When off, everything keeps moving, and a body you drag is held still with its velocity.">
                     <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
                 </label>
                 <label><input type="checkbox" id="trailToggle" checked> Trails</label>
@@ -514,7 +514,12 @@
                 position (how far away, how far round, how high up), and
                 Three.js turns the 3D scene into pixels on the graphics card.
                 <b>Observe</b> (Esc) only looks around, so you can't move a
-                body by accident; <b>Move</b> (M) drags bodies.
+                body by accident; <b>Move</b> (M) drags bodies. With
+                "Auto-pause while editing" on, the simulation waits while you
+                place, drag or edit a body. With it off, everything keeps
+                moving; a body you drag is held still under the mouse (still
+                pulling on the others) and carries on with its old velocity
+                when you let go.
             </p>
             <p>
                 The grid is the <em>working plane</em>: a flat plane at the
