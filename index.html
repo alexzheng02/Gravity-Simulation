@@ -16,6 +16,7 @@
             <p>Interactive 3D N-body gravity simulator</p>
         </div>
     </div>
+    <div class="header-actions">
     <div class="scenario-picker">
         <label for="scenarioSelect">Scenario</label>
         <select id="scenarioSelect">
@@ -31,6 +32,46 @@
             <option value="asteroidBelt">Asteroid Belt &amp; Comet</option>
             <option value="empty">Empty Space</option>
         </select>
+    </div>
+
+    <!-- Options: what to show, saved in this browser -->
+    <div class="options-menu">
+        <button id="optionsBtn" aria-haspopup="true" aria-expanded="false" aria-controls="optionsPanel">
+            <span aria-hidden="true">&#9881;</span> Options
+        </button>
+        <div class="options-panel hidden" id="optionsPanel" role="dialog" aria-label="Options">
+            <fieldset>
+                <legend>Show on the canvas</legend>
+                <label><input type="checkbox" id="trailToggle" checked> Trails</label>
+                <label><input type="checkbox" id="labelToggle" checked> Labels</label>
+                <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
+                <label title="Arrows all around the view, pointing the way gravity pulls"><input type="checkbox" id="arrowsToggle"> Gravity field arrows (3D)</label>
+                <label title="The ellipse Kepler's laws predict for the selected body"><input type="checkbox" id="orbitToggle" checked> Predicted orbit (Kepler ellipse)</label>
+                <label><input type="checkbox" id="treeToggle"> Barnes-Hut tree</label>
+            </fieldset>
+            <fieldset>
+                <legend>Scene</legend>
+                <label><input type="checkbox" id="gridToggle" checked> Reference grid</label>
+                <label><input type="checkbox" id="starsToggle" checked> Background stars</label>
+                <label><input type="checkbox" id="spinToggle"> Slowly turn the view</label>
+                <label title="Frames per second, and how long physics and drawing take each frame"><input type="checkbox" id="perfToggle"> Performance readout</label>
+            </fieldset>
+            <fieldset>
+                <legend>Simulation</legend>
+                <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
+                <label title="Pauses while you place or move a body, drag a slider or type in a box, then carries on. When off, everything keeps moving, and a body you drag is held still with its velocity.">
+                    <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
+                </label>
+            </fieldset>
+            <div class="options-footer">
+                <span class="muted">Saved in this browser</span>
+                <span>
+                    <button id="resetOptionsBtn">Reset to defaults</button>
+                    <button id="closeOptionsBtn" class="primary">Done</button>
+                </span>
+            </div>
+        </div>
+    </div>
     </div>
 </header>
 
@@ -157,79 +198,8 @@
 
         <div class="tab-page" id="tab-controls">
 
-        <section class="panel-section">
-            <h2>Physics</h2>
-
-            <label class="field">
-                Integrator (how time steps forward)
-                <select id="integratorSelect">
-                    <option value="verlet">Velocity Verlet (stable)</option>
-                    <option value="euler">Euler (simple, drifts)</option>
-                </select>
-            </label>
-
-            <label class="field">
-                Gravity solver
-                <select id="solverSelect">
-                    <option value="auto">Auto (Barnes-Hut above 200 bodies)</option>
-                    <option value="direct">Direct (exact, every pair)</option>
-                    <option value="bh">Barnes-Hut (fast, approximate)</option>
-                </select>
-            </label>
-
-            <div class="field">
-                <label for="thetaSlider">
-                    Barnes-Hut accuracy (&theta;) <span class="value" id="thetaValue">0.60</span>
-                </label>
-                <input type="range" id="thetaSlider" min="0.1" max="1.5" step="0.05" value="0.6">
-                <span class="range-ends"><span>accurate, slower</span><span>rough, faster</span></span>
-            </div>
-
-            <p class="solver-stats" id="solverStats"></p>
-
-            <label class="field">
-                Gravity field (a slice through space, at the grid's height)
-                <select id="fieldSelect">
-                    <option value="off">Off</option>
-                    <option value="map">Contour map: glow and rings</option>
-                    <option value="sheet">Rubber sheet: how deep the wells are</option>
-                    <option value="pull">Pull sheet: which way gravity pulls</option>
-                </select>
-            </label>
-
-            <div class="toggles">
-                <label title="Pauses while you place or move a body, drag a slider or type in a box, then carries on. When off, everything keeps moving, and a body you drag is held still with its velocity.">
-                    <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
-                </label>
-                <label><input type="checkbox" id="trailToggle" checked> Trails</label>
-                <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
-                <label title="Arrows all around the view, pointing the way gravity pulls"><input type="checkbox" id="arrowsToggle"> Gravity field arrows (3D)</label>
-                <label title="The ellipse Kepler's laws predict for the selected body"><input type="checkbox" id="orbitToggle" checked> Predicted orbit (Kepler ellipse)</label>
-                <label><input type="checkbox" id="gridToggle" checked> Reference grid</label>
-                <label><input type="checkbox" id="starsToggle" checked> Background stars</label>
-                <label title="Frames per second, and how long physics and drawing take each frame"><input type="checkbox" id="perfToggle"> Performance readout</label>
-                <label><input type="checkbox" id="spinToggle"> Slowly turn the view</label>
-                <label><input type="checkbox" id="treeToggle"> Show Barnes-Hut tree</label>
-                <label><input type="checkbox" id="mergeToggle" checked> Collisions merge</label>
-                <label><input type="checkbox" id="labelToggle" checked> Labels</label>
-            </div>
-
-            <p class="legend-note hidden" id="vectorLegend">
-                <span class="dot" style="background:#4ade80"></span>velocity
-                <span class="dot" style="background:#fb923c"></span>acceleration (gravity)
-                <br>Arrow lengths are scaled down to fit on screen.
-            </p>
-
-            <p class="legend-note hidden" id="treeLegend">
-                Each cube holds up to 8 bodies before splitting into eight.
-                Select a body to see what its group uses:
-                <br><span class="dot" style="background:#fb923c"></span>far cubes, each pulling as one mass at the end of its line
-                <br><span class="dot" style="background:#22d3ee"></span>nearby bodies, calculated one by one
-            </p>
-        </section>
-
-        <section class="panel-section">
-            <h2>Energy</h2>
+        <details class="panel-section foldable" id="sectionEnergy" open>
+            <summary><h2>Energy</h2></summary>
             <canvas id="energyChart"></canvas>
             <div class="energy-legend">
                 <span><i style="background:#38bdf8"></i>Kinetic</span>
@@ -239,15 +209,10 @@
             <p class="drift">
                 Total energy drift: <b id="driftValue">0.000%</b>
             </p>
-        </section>
+        </details>
 
-        <section class="panel-section">
-            <h2>Bodies <span class="count" id="bodyCount"></span></h2>
-            <div id="bodyList"></div>
-        </section>
-
-        <section class="panel-section">
-            <h2>Selected Body</h2>
+        <details class="panel-section foldable" id="sectionSelected" open>
+            <summary><h2>Selected Body</h2></summary>
 
             <p id="selectedBodyName" class="muted">Click a body to inspect it</p>
 
@@ -325,7 +290,71 @@
                 <button id="showEquationsBtn" class="link-button">See the equations for this body &rarr;</button>
 
             </div>
-        </section>
+        </details>
+
+        <details class="panel-section foldable" id="sectionBodies" open>
+            <summary><h2>Bodies <span class="count" id="bodyCount"></span></h2></summary>
+            <div id="bodyList"></div>
+        </details>
+
+        <details class="panel-section foldable" id="sectionPhysics" open>
+            <summary><h2>Physics</h2></summary>
+
+            <label class="field">
+                Integrator (how time steps forward)
+                <select id="integratorSelect">
+                    <option value="verlet">Velocity Verlet (stable)</option>
+                    <option value="euler">Euler (simple, drifts)</option>
+                </select>
+            </label>
+
+            <label class="field">
+                Gravity solver
+                <select id="solverSelect">
+                    <option value="auto">Auto (Barnes-Hut above 200 bodies)</option>
+                    <option value="direct">Direct (exact, every pair)</option>
+                    <option value="bh">Barnes-Hut (fast, approximate)</option>
+                </select>
+            </label>
+
+            <div class="field">
+                <label for="thetaSlider">
+                    Barnes-Hut accuracy (&theta;) <span class="value" id="thetaValue">0.60</span>
+                </label>
+                <input type="range" id="thetaSlider" min="0.1" max="1.5" step="0.05" value="0.6">
+                <span class="range-ends"><span>accurate, slower</span><span>rough, faster</span></span>
+            </div>
+
+            <p class="solver-stats" id="solverStats"></p>
+
+            <label class="field">
+                Gravity field (a slice through space, at the grid's height)
+                <select id="fieldSelect">
+                    <option value="off">Off</option>
+                    <option value="map">Contour map: glow and rings</option>
+                    <option value="sheet">Rubber sheet: how deep the wells are</option>
+                    <option value="pull">Pull sheet: which way gravity pulls</option>
+                </select>
+            </label>
+
+
+            <p class="legend-note hidden" id="vectorLegend">
+                <span class="dot" style="background:#4ade80"></span>velocity
+                <span class="dot" style="background:#fb923c"></span>acceleration (gravity)
+                <br>Arrow lengths are scaled down to fit on screen.
+            </p>
+
+            <p class="legend-note hidden" id="treeLegend">
+                Each cube holds up to 8 bodies before splitting into eight.
+                Select a body to see what its group uses:
+                <br><span class="dot" style="background:#fb923c"></span>far cubes, each pulling as one mass at the end of its line
+                <br><span class="dot" style="background:#22d3ee"></span>nearby bodies, calculated one by one
+            </p>
+        </details>
+
+
+
+
 
         <details class="panel-section explainer">
             <summary>How it works</summary>
@@ -436,8 +465,8 @@
                 <code>n log n</code> instead of <code>n&sup2;</code>.
             </p>
             <p>
-                The catch: it's an approximation. Turn on "Show Barnes-Hut
-                tree", select a body, and move the &theta; slider to see the
+                The catch: it's an approximation. Turn on "Barnes-Hut tree"
+                (&#9881; Options), select a body, and move the &theta; slider to see the
                 trade-off between speed and accuracy. The energy graph shows
                 the small extra error compared to the exact method.
             </p>
