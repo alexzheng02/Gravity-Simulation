@@ -1,6 +1,8 @@
-# 🪐 GravityLab
+# lumi
 
-**An interactive 3D gravity simulator** for planets, stars and black holes. Place bodies, throw them into orbit, crash galaxies together, and watch how they pull on each other. Every number on the screen comes from the actual equations, live.
+*imagine the stars.*
+
+**An approachable, interactive 3D gravity simulator** for planets, stars and black holes. Built to help anyone explore, visualize, and learn a little about astrophysics. Place bodies, throw them into orbit, crash galaxies together, and watch how they pull on each other. Every number on the screen comes from the actual equations, live.
 
 <p align="center">
   <img width="240" height="240" alt="Korone" src="https://github.com/user-attachments/assets/3504b8c8-3786-40ac-af36-3cbcf19f0a61" />
@@ -11,7 +13,7 @@ Built for the **SPS MathPhys (2026) Hackathon**, theme: **Visualization of Physi
 
 <img width="1455" height="731" alt="Screenshot 2026-10-27 at 2 48 56 PM" src="https://github.com/user-attachments/assets/41fc0d2a-bff3-4686-8902-097411a17e41" />
 
-**▶ Try it in your browser:** https://alexzheng02.github.io/Gravity-Simulation/
+**▶ Try it in your browser:** https://alexzheng02.github.io/lumi/
 
 ## Table of Contents
 
@@ -35,8 +37,8 @@ There's nothing to install or build. It's a web page.
 **Option 1: open the file**
 1. Download the project: the green **Code → Download ZIP** button on GitHub, then unzip it. Or clone it:
    ```bash
-   git clone https://github.com/alexzheng02/Gravity-Simulation.git
-   cd Gravity-Simulation
+   git clone https://github.com/alexzheng02/lumi.git
+   cd lumi
    ```
 2. Open `index.html` in a web browser (Chrome, Edge, Firefox or Safari):
    ```bash
@@ -196,6 +198,10 @@ All values are in **simulation units** with G = 1, chosen so numbers stay readab
 
 - Alex Zheng
 - Dewa Amandara
+
+Special thanks to **SIAM Student Chapter, Stony Brook**.
+
+Meet the team and read our story on the [About us page](https://alexzheng02.github.io/lumi/about.html).
 
 ## 💡 Ideas for next steps
 

@@ -1,5 +1,5 @@
 /*
- * GravityLab physics validation
+ * lumi physics validation
  *
  * Every check compares the simulator against an answer worked out
  * independently (textbook formulas or published results). The results are

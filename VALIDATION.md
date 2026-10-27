@@ -1,6 +1,6 @@
 # Physics validation
 
-How do we know GravityLab's physics is right? We wrote **34 automated checks**. Each one compares the simulator against an answer worked out independently, from textbook formulas or published results. **All 34 pass.**
+How do we know lumi's physics is right? We wrote **34 automated checks**. Each one compares the simulator against an answer worked out independently, from textbook formulas or published results. **All 34 pass.**
 
 Run them yourself (needs [Node.js](https://nodejs.org) 18 or newer):
 

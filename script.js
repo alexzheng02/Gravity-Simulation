@@ -1,7 +1,7 @@
 "use strict";
 
 /* ==========================================================================
-   GravityLab: an interactive 3D N-body gravity simulator
+   lumi: an interactive 3D N-body gravity simulator
 
    How the code is organised:
      1. Settings and state
@@ -1850,7 +1850,7 @@ const MIN_DISTANCE = 10;
 const MAX_DISTANCE = 60000;
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setClearColor(0x02040b);
+renderer.setClearColor(0x030305);
 const scene = new THREE.Scene();
 const view = new THREE.PerspectiveCamera(FOV, 1, 1, 1e6);
 view.up.set(0, 0, 1); // z is up

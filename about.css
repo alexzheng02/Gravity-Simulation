@@ -1,0 +1,156 @@
+.about-page { background: #08070b; }
+.about-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 5vw; border-bottom: 1px solid #ffffff0b; }
+.about-brand { display: flex; align-items: center; gap: 12px; color: #f2e9fb; text-decoration: none; font-size: 30px; font-weight: 750; letter-spacing: -1.2px; }
+.about-brand .logo { width: 48px; height: 48px; }
+.about-header nav a { color: #c1b5cd; text-decoration: none; font-size: 12px; }
+.about-header nav a span { margin-left: 14px; }
+.about-header a:hover { color: #fff; }
+.about-main { overflow: hidden; }
+.about-main h1, .about-main h2 { font-family: "Manrope", sans-serif; font-style: normal; font-weight: 450; letter-spacing: -.055em; line-height: 1.12; }
+.about-main h2 { font-size: clamp(34px, 4.8vw, 62px); color: #f2ebf8; }
+.about-main h2 span, .about-hero h1 span { color: #b6a0cd; }
+.eyebrow { color: #bfb0cd; font-size: 10px; font-weight: 550; letter-spacing: 2.2px; text-transform: uppercase; }
+.about-hero { position: relative; isolation: isolate; min-height: 760px; min-height: min(850px, 91svh); padding: 150px 7vw 65px; display: flex; flex-direction: column; justify-content: center; }
+.about-hero h1 { font-size: clamp(45px, 6.8vw, 94px); margin: 28px 0; max-width: 1000px; text-shadow: 0 0 40px #e3b6ff12; }
+.hero-copy { color: #aca0b9; font-size: 15px; line-height: 1.9; }
+.hero-mark { position: absolute; z-index: -1; right: -9%; top: 2%; width: 65vw; height: 100%; background: url("assets/gravitylab-mark-soft.png") center / contain no-repeat; opacity: .1; filter: blur(2px); transform: rotate(-13deg); mask-image: linear-gradient(90deg, transparent, #000 50%); }
+.hero-dust { position: absolute; inset: 0; z-index: -2; background: radial-gradient(ellipse at 72% 47%, #79529f20, transparent 60%), radial-gradient(circle at 18% 25%, #dac5efaa 0 .6px, transparent 1px), radial-gradient(circle at 80% 78%, #dac5ef88 0 1px, transparent 1.4px), radial-gradient(circle at 55% 15%, #dac5ef66 0 .6px, transparent 1px); }
+.scroll-invitation { margin-top: 55px; color: #c1b2cd; font-size: 11px; text-decoration: none; letter-spacing: .4px; align-self: flex-start; padding-block: 10px; }
+.scroll-invitation span { margin-left: 28px; }
+.template-note { margin-top: 30px; color: #9787a5; font-size: 10px; letter-spacing: .5px; }
+.story-section, .values-section, .team-section { max-width: 1160px; margin: auto; padding: 115px 35px; border-top: 1px solid #dfc5ff16; }
+.section-number { color: #8c729f; margin-right: 20px; }
+.story-content { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; margin-top: 40px; }
+.prose { padding-top: 5px; }
+.prose p, .value-row p, .team-member > p { color: #b4a6c1; font-size: 14px; line-height: 1.95; }
+.prose p + p { margin-top: 22px; }
+.wonder-section { text-align: center; padding: 110px 25px 145px; background: radial-gradient(ellipse at 50% 55%, #9673b718, transparent 65%); }
+.wonder-star { color: #eee0ff; font-size: 60px; display: block; margin-bottom: 22px; text-shadow: 0 0 25px #e4c6ff80; }
+.wonder-section h2 { margin: 28px 0; }
+.wonder-section > p:last-child { color: #b4a6c1; font-size: 14px; line-height: 1.9; max-width: 440px; margin: auto; }
+.values-section { display: grid; grid-template-columns: 1fr 1fr; gap: 90px; }
+.values-section h2 { margin-top: 32px; }
+.value-row { display: flex; gap: 24px; padding: 30px 0; border-bottom: 1px solid #dfc5ff18; }
+.value-row:first-child { padding-top: 0; }
+.value-row > span { font-size: 28px; color: #d6bfe6; width: 30px; flex-shrink: 0; }
+.value-row h3 { font-size: 19px; font-weight: 500; letter-spacing: -.5px; margin-bottom: 10px; }
+.value-row p { font-size: 13px; }
+.team-heading { display: flex; align-items: end; justify-content: space-between; gap: 30px; }
+.team-heading h2 { margin-top: 32px; }
+.team-heading > p { color: #b4a6c1; font-size: 13px; line-height: 1.9; }
+.team-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; margin-top: 60px; }
+.portrait-placeholder { aspect-ratio: 1.15; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: radial-gradient(ellipse at 50% 70%, #b492cb22, transparent 65%), #100d15; border-bottom: 1px solid #bca0d02b; }
+.portrait-placeholder span:first-child { font-size: 56px; color: #a790bb55; font-weight: 300; letter-spacing: -3px; }
+.portrait-placeholder span:last-child { font-size: 9px; text-transform: uppercase; letter-spacing: 2px; color: #a08aaf; }
+.portrait-two { background: radial-gradient(ellipse at 50% 30%, #8f90cb22, transparent 65%), #0e0d15; }
+.team-member h3 { font-size: 21px; font-weight: 500; letter-spacing: -.6px; margin: 24px 0 5px; }
+.team-member .team-role { color: #c5acd7; font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 15px; }
+.about-closing { text-align: center; padding: 100px 20px 140px; background: radial-gradient(ellipse at 50% 70%, #79529f18, transparent 65%); }
+.about-closing .logo { width: 90px; height: 90px; display: block; margin: 0 auto 30px; }
+.about-closing h2 { margin: 25px 0 40px; }
+.universe-link { display: inline-block; border-radius: 999px; background: #e8dcf2; color: #241a2e; padding: 14px 25px; text-decoration: none; font-size: 12px; box-shadow: 0 0 30px #dfc0ff1f; }
+.universe-link span { margin-left: 35px; }
+.universe-link:hover { background: #f7edff; }
+.about-page .site-footer { margin-inline: 5vw; }
+/* Content is visible by default if JavaScript is unavailable. */
+.reveal-pending { opacity: 0; transform: translateY(30px); transition: opacity .85s ease, transform .85s cubic-bezier(.2,.65,.3,1); }
+.reveal-pending.is-visible { opacity: 1; transform: none; }
+@media (max-width: 700px) {
+    .about-header { padding: 18px 22px; }
+    .about-brand { font-size: 26px; gap: 7px; }
+    .about-brand .logo { width: 38px; height: 38px; }
+    .about-header nav a { font-size: 10px; }
+    .about-header nav a span { margin-left: 6px; }
+    .about-hero { padding: 90px 24px 60px; min-height: 690px; }
+    .about-hero h1 { font-size: clamp(39px, 8.8vw, 60px); }
+    .hero-copy { font-size: 13px; }
+    .hero-mark { width: 110vw; right: -35%; top: 5%; opacity: .1; }
+    .story-section, .values-section, .team-section { padding: 75px 24px; }
+    .story-content, .values-section { grid-template-columns: 1fr; gap: 35px; }
+    .wonder-section { padding: 60px 24px 90px; }
+    .team-heading { display: block; }
+    .team-heading > p { margin-top: 25px; }
+    .team-grid { grid-template-columns: 1fr; gap: 45px; margin-top: 35px; }
+    .about-closing { padding: 60px 24px 90px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .reveal-pending { opacity: 1; transform: none; transition: none; }
+}
+/* Reference artwork keeps its original texture; screen blending dissolves black edges. */
+.story-section { position: relative; padding-bottom: 210px; }
+.story-orbit {
+    position: absolute; left: 55px; bottom: 72px; width: 300px; height: 170px;
+    background: url("assets/about-orbit.png") center / 150% auto no-repeat;
+    mix-blend-mode: screen; opacity: .32; filter: blur(.45px); pointer-events: none;
+}
+.wonder-section { position: relative; isolation: isolate; }
+.mission-stars {
+    width: 190px; height: 155px; margin: 0 auto 32px;
+    background: url("assets/about-stars.png") 100% 100% / 250% auto no-repeat;
+    mix-blend-mode: screen; opacity: .8; pointer-events: none;
+}
+.wonder-section > p:last-child { max-width: 540px; }
+.values-star {
+    width: 300px; height: 245px; margin: 45px 0 -25px -65px;
+    background: url("assets/about-star-glow.png") center / cover no-repeat;
+    mix-blend-mode: screen; opacity: .25; pointer-events: none;
+    mask-image: radial-gradient(ellipse, #000 25%, transparent 72%);
+}
+.team-grid { gap: 60px; }
+.team-member { padding: 25px 0 10px; border-top: 1px solid #dfc5ff20; }
+.team-monogram { font-size: 64px; letter-spacing: -5px; color: #c5afd8; font-weight: 400; display: flex; align-items: center; gap: 30px; text-shadow: 0 0 28px #d9c0ff15; }
+.team-monogram span { font-size: 28px; color: #d9c8e4; text-shadow: 0 0 15px #d9c0ff55; }
+.about-closing { position: relative; isolation: isolate; }
+.closing-star {
+    position: absolute; right: 7%; top: 45px; width: 250px; height: 250px; z-index: -1;
+    background: url("assets/about-star-sketch.png") center / 230% auto no-repeat;
+    mix-blend-mode: screen; opacity: .28; pointer-events: none;
+    mask-image: radial-gradient(ellipse, #000 25%, transparent 70%);
+}
+@media (max-width: 700px) {
+    .story-section { padding-bottom: 220px; }
+    .story-orbit { left: 20px; bottom: 65px; width: 270px; height: 160px; }
+    .values-star { width: 220px; height: 165px; margin: 20px 0 -15px -45px; }
+    .mission-stars { width: 150px; height: 125px; }
+    .closing-star { right: -65px; top: 0; width: 200px; height: 200px; opacity: .17; }
+    .team-grid { gap: 20px; }
+}
+.mission-stars {
+    mask-image: radial-gradient(ellipse at 60% 58%, #000 30%, transparent 74%);
+}
+
+.thanks-section {
+    max-width: 1090px;
+    margin: 0 auto;
+    padding: 50px 24px 60px;
+    text-align: center;
+    border-top: 1px solid #dfc5ff16;
+}
+.about-main .thanks-section h2 {
+    font-size: clamp(25px, 3vw, 36px);
+    margin: 18px 0 14px;
+    letter-spacing: -.035em;
+}
+.thanks-section > p:last-child {
+    color: #b4a6c1;
+    font-size: 13px;
+    line-height: 1.8;
+}
+@media (max-width: 700px) {
+    .thanks-section { margin-inline: 24px; padding-inline: 0; }
+}
+
+.team-portrait {
+    filter: brightness(.78);
+    display: block;
+    width: 100%;
+    max-width: 280px;
+    height: auto;
+    aspect-ratio: 1;
+    object-fit: contain;
+    background: transparent;
+    border-radius: 0;
+}
+@media (max-width: 700px) {
+    .team-portrait { max-width: 260px; }
+}
