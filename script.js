@@ -1,16 +1,20 @@
 "use strict";
 
 /* ==========================================================================
-   GravityLab: an interactive N-body gravity simulator
+   GravityLab: an interactive 3D N-body gravity simulator
 
    How the code is organised:
      1. Settings and state
-     2. Physics (gravity, time stepping, collisions, energy)
+     2. Physics in 3D (gravity, octree, time stepping, collisions, energy, orbits)
      3. Scenarios (the presets in the dropdown)
-     4. Camera (zoom / pan / converting mouse position to world position)
-     5. Drawing (stars, planets, trails, arrows, gravity field, energy graph)
-     6. Mouse, keyboard and UI controls
+     4. Camera (rotate / pan / zoom, and converting between 3D and screen positions)
+     5. Drawing with Three.js (bodies, trails, orbits, gravity sheet, tree view),
+        plus a flat overlay for labels and arrows, and the energy graph
+     6. Mouse, keyboard and UI controls (tools, panels, Equations tab)
      7. The main loop
+
+   Three.js (lib/three.min.js, MIT licence) only does the drawing; all the
+   physics is our own code.
    ========================================================================== */
 
 
@@ -93,6 +97,8 @@ const options = {
     vectors: false,
     orbit: true,
     field: false,
+    grid: true,
+    spinView: false,
     tree: false,
     merge: true,
     labels: true
@@ -121,9 +127,11 @@ let energyHistory = [];
 let energyBaseline = null;
 let pendingEnergyEvent = false;
 
-// View state
+// View state. The 3D view is drawn on `canvas`; labels and arrows are drawn
+// on a see-through `overlay` canvas on top of it.
 const canvas = document.getElementById("universe");
-const ctx = canvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
 const energyCanvas = document.getElementById("energyChart");
 const energyCtx = energyCanvas.getContext("2d");
 
@@ -131,26 +139,29 @@ let viewWidth = 0;
 let viewHeight = 0;
 let pixelRatio = 1;
 
-// follow: "free", "com" (centre of mass), "selected", or "body" (follow `target`)
-const camera = { x: 0, y: 0, zoom: 1, follow: "free", target: null };
+// The camera looks at (x, y, z) from `distance` away (see section 4).
+// follow: "free", "com" (centre of mass), "selected", or "body" (follow `followed`)
+const camera = {
+    x: 0, y: 0, z: 0,
+    distance: 800,
+    yaw: -Math.PI / 2,
+    pitch: 55 * Math.PI / 180,
+    follow: "free",
+    followed: null
+};
 
-let brush = null;       // null = Select / Pan tool; otherwise the body type being placed
+let tool = "observe";   // what the mouse does: "observe", "move", or a body type to place
+let brush = null;       // the body type being placed, or null (see setTool)
 let pointer = null;     // what the mouse is currently doing (placing or panning)
 let effects = [];       // collision flashes
-let starfieldPattern = null;
-
-const fieldCanvas = document.createElement("canvas");
-const fieldCtx = fieldCanvas.getContext("2d");
-let fieldImage = null;
-let fieldLevels = new Float32Array(0);
-let lastFieldCell = 4;
+let frameCount = 0;
 
 
 /* ==========================================================================
    2. PHYSICS
    ========================================================================== */
 
-function createBody({ type, name, x, y, vx = 0, vy = 0, mass, radius, color, collisionless }) {
+function createBody({ type, name, x, y, z = 0, vx = 0, vy = 0, vz = 0, mass, radius, color, collisionless }) {
     const preset = BODY_TYPES[type];
     typeCounters[type] = (typeCounters[type] || 0) + 1;
 
@@ -158,8 +169,8 @@ function createBody({ type, name, x, y, vx = 0, vy = 0, mass, radius, color, col
         id: nextId++,
         type,
         name: name ?? preset.label + " " + typeCounters[type],
-        x, y, vx, vy,
-        ax: 0, ay: 0, phi: 0,
+        x, y, z, vx, vy, vz,
+        ax: 0, ay: 0, az: 0, phi: 0,
         dead: false,
         // Passes through everything (galaxy stars, and the asteroid belt's asteroids)
         collisionless: collisionless ?? preset.collisionless ?? false,
@@ -187,11 +198,11 @@ function nextPlanetColor() {
  *    bodies (Newton's third law). Exact, but the work grows with n^2:
  *    1,000 bodies = ~500,000 pairs every step.
  *
- * 2. Barnes-Hut: put the bodies in a "quadtree" (squares split into four
- *    smaller squares, again and again, until each square holds one body).
- *    A far-away square full of bodies pulls almost exactly like ONE body
+ * 2. Barnes-Hut: put the bodies in an "octree" (cubes split into eight
+ *    smaller cubes, again and again, until each cube holds a few bodies).
+ *    A far-away cube full of bodies pulls almost exactly like ONE body
  *    with their total mass sitting at their centre of mass. So for each
- *    body we walk the tree, and if a square is small compared to its
+ *    body we walk the tree, and if a cube is small compared to its
  *    distance (size / distance < theta), we use that single combined pull
  *    instead of visiting every body inside it. The work grows like
  *    n * log(n) instead of n^2.
@@ -222,6 +233,7 @@ function computeForcesDirect(list, isMain) {
     for (const body of list) {
         body.ax = 0;
         body.ay = 0;
+        body.az = 0;
         body.phi = 0;
     }
 
@@ -236,16 +248,19 @@ function computeForcesDirect(list, isMain) {
 
             const dx = b.x - a.x;
             const dy = b.y - a.y;
-            const distSquared = dx * dx + dy * dy + eps2;
+            const dz = b.z - a.z;
+            const distSquared = dx * dx + dy * dy + dz * dz + eps2;
 
-            // G / r^3. Multiplying by (dx, dy), which has length r,
+            // G / r^3. Multiplying by (dx, dy, dz), which has length r,
             // gives a vector of length G / r^2 pointing at the other body.
             const factor = G / (distSquared * Math.sqrt(distSquared));
 
             a.ax += dx * factor * b.mass;
             a.ay += dy * factor * b.mass;
+            a.az += dz * factor * b.mass;
             b.ax -= dx * factor * a.mass;
             b.ay -= dy * factor * a.mass;
+            b.az -= dz * factor * a.mass;
 
             // Potential: -G * M / r
             const inverseDist = 1 / Math.sqrt(distSquared);
@@ -261,11 +276,11 @@ function computeForcesDirect(list, isMain) {
     }
 }
 
-/* ---------- The quadtree ----------
+/* ---------- The octree ----------
  *
- * Stored in flat typed arrays (one slot per square, or "node") because that
+ * Stored in flat typed arrays (one slot per cube, or "node") because that
  * is much faster in JavaScript than thousands of small objects.
- * Each leaf holds up to LEAF_CAPACITY bodies before it splits into four.
+ * Each leaf holds up to LEAF_CAPACITY bodies before it splits into eight.
  * Children are always created after their parent, so walking the node list
  * backwards visits children before parents.
  */
@@ -275,13 +290,15 @@ const tree = {
     capacity: 0,
     count: 0,       // nodes in use
     list: null,     // the bodies the tree was built from
-    cx: null,       // centre of the square
+    cx: null,       // centre of the cube
     cy: null,
-    half: null,     // half the square's width
+    cz: null,
+    half: null,     // half the cube's width
     mass: null,     // total mass inside
     comX: null,     // centre of mass of everything inside
     comY: null,
-    child: null,    // 4 children per node, -1 = none
+    comZ: null,
+    child: null,    // 8 children per node, -1 = none
     leaf: null,     // 1 if the node has no children
     first: null,    // leaf: first body inside (-1 = empty)
     leafCount: null,// leaf: how many bodies inside
@@ -289,21 +306,24 @@ const tree = {
     // body in the same leaf (a linked list)
     bx: new Float64Array(0),
     by: new Float64Array(0),
+    bz: new Float64Array(0),
     bm: new Float64Array(0),
     next: new Int32Array(0)
 };
 
-const NODE_ARRAYS = ["cx", "cy", "half", "mass", "comX", "comY", "child", "leaf", "first", "leafCount"];
+const NODE_ARRAYS = ["cx", "cy", "cz", "half", "mass", "comX", "comY", "comZ", "child", "leaf", "first", "leafCount"];
 
 function allocateTree(capacity) {
     tree.capacity = capacity;
     tree.cx = new Float64Array(capacity);
     tree.cy = new Float64Array(capacity);
+    tree.cz = new Float64Array(capacity);
     tree.half = new Float64Array(capacity);
     tree.mass = new Float64Array(capacity);
     tree.comX = new Float64Array(capacity);
     tree.comY = new Float64Array(capacity);
-    tree.child = new Int32Array(capacity * 4);
+    tree.comZ = new Float64Array(capacity);
+    tree.child = new Int32Array(capacity * 8);
     tree.leaf = new Uint8Array(capacity);
     tree.first = new Int32Array(capacity);
     tree.leafCount = new Int32Array(capacity);
@@ -317,39 +337,39 @@ function growTree() {
     for (const key of NODE_ARRAYS) tree[key].set(old[key]);
 }
 
-function newNode(cx, cy, half) {
+function newNode(cx, cy, cz, half) {
     if (tree.count >= tree.capacity) growTree();
     const k = tree.count++;
     tree.cx[k] = cx;
     tree.cy[k] = cy;
+    tree.cz[k] = cz;
     tree.half[k] = half;
     tree.mass[k] = 0;
-    tree.child[4 * k] = -1;
-    tree.child[4 * k + 1] = -1;
-    tree.child[4 * k + 2] = -1;
-    tree.child[4 * k + 3] = -1;
+    tree.child.fill(-1, 8 * k, 8 * k + 8);
     tree.leaf[k] = 1;
     tree.first[k] = -1;
     tree.leafCount[k] = 0;
     return k;
 }
 
-// Which quarter of node k is the point in? 0 = top-left ... 3 = bottom-right
-function quadrant(k, x, y) {
-    return (x >= tree.cx[k] ? 1 : 0) + (y >= tree.cy[k] ? 2 : 0);
+// Which eighth of node k is the point in? Each bit says which side:
+// bit 1 = right half (x), bit 2 = y, bit 4 = z
+function octant(k, x, y, z) {
+    return (x >= tree.cx[k] ? 1 : 0) + (y >= tree.cy[k] ? 2 : 0) + (z >= tree.cz[k] ? 4 : 0);
 }
 
 function childFor(k, q) {
-    const existing = tree.child[4 * k + q];
+    const existing = tree.child[8 * k + q];
     if (existing !== -1) return existing;
 
     const h = tree.half[k] / 2;
     const c = newNode(
         tree.cx[k] + (q & 1 ? h : -h),
         tree.cy[k] + (q & 2 ? h : -h),
+        tree.cz[k] + (q & 4 ? h : -h),
         h
     );
-    tree.child[4 * k + q] = c;
+    tree.child[8 * k + q] = c;
     return c;
 }
 
@@ -362,7 +382,8 @@ function addToLeaf(k, i) {
 function insertBody(i) {
     const x = tree.bx[i];
     const y = tree.by[i];
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const z = tree.bz[i];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
 
     let k = 0;
     let depth = 0;
@@ -375,20 +396,20 @@ function insertBody(i) {
                 return;
             }
 
-            // Full: split into four, moving the bodies down one level
+            // Full: split into eight, moving the bodies down one level
             let j = tree.first[k];
             tree.leaf[k] = 0;
             tree.first[k] = -1;
             tree.leafCount[k] = 0;
             while (j !== -1) {
                 const nextJ = tree.next[j];
-                addToLeaf(childFor(k, quadrant(k, tree.bx[j], tree.by[j])), j);
+                addToLeaf(childFor(k, octant(k, tree.bx[j], tree.by[j], tree.bz[j])), j);
                 j = nextJ;
             }
         }
 
-        // Go down into the right quarter
-        k = childFor(k, quadrant(k, x, y));
+        // Go down into the right eighth
+        k = childFor(k, octant(k, x, y, z));
         depth++;
     }
 }
@@ -403,73 +424,84 @@ function buildTree(list) {
         tree.next = new Int32Array(size);
         tree.bx = new Float64Array(size);
         tree.by = new Float64Array(size);
+        tree.bz = new Float64Array(size);
         tree.bm = new Float64Array(size);
     }
     if (tree.capacity < n + 64) allocateTree(n + 64);
     if (n === 0) return;
 
-    // Copy positions into fast arrays and find a root square that fits them all
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // Copy positions into fast arrays and find a root cube that fits them all
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let i = 0; i < n; i++) {
         const b = list[i];
         tree.bx[i] = b.x;
         tree.by[i] = b.y;
+        tree.bz[i] = b.z;
         tree.bm[i] = b.mass;
-        if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) continue;
+        if (!Number.isFinite(b.x) || !Number.isFinite(b.y) || !Number.isFinite(b.z)) continue;
         if (b.x < minX) minX = b.x;
         if (b.x > maxX) maxX = b.x;
         if (b.y < minY) minY = b.y;
         if (b.y > maxY) maxY = b.y;
+        if (b.z < minZ) minZ = b.z;
+        if (b.z > maxZ) maxZ = b.z;
     }
     if (minX === Infinity) return;
 
-    const half = Math.max(maxX - minX, maxY - minY) / 2 + 1;
-    newNode((minX + maxX) / 2, (minY + maxY) / 2, half);
+    // The root cube's lowest corner sits at the lowest body (rather than
+    // centring the cube). A flat system, like a disk of rocks, then stays on
+    // one side of each split in z until the cubes are as small as the disk
+    // is thick. Centred, every split would cut the disk into a top and a
+    // bottom half: twice the cubes, and ~50% more work, for nothing.
+    const half = Math.max(maxX - minX, maxY - minY, maxZ - minZ) / 2 + 1;
+    newNode(minX + half, minY + half, minZ + half, half);
 
     for (let i = 0; i < n; i++) insertBody(i);
 
-    // Total mass and centre of mass, from the smallest squares up
-    const { bx, by, bm, next } = tree;
+    // Total mass and centre of mass, from the smallest cubes up
+    const { bx, by, bz, bm, next } = tree;
     for (let k = tree.count - 1; k >= 0; k--) {
-        let m = 0, mx = 0, my = 0;
+        let m = 0, mx = 0, my = 0, mz = 0;
 
         if (tree.leaf[k]) {
             for (let j = tree.first[k]; j !== -1; j = next[j]) {
                 m += bm[j];
                 mx += bm[j] * bx[j];
                 my += bm[j] * by[j];
+                mz += bm[j] * bz[j];
             }
         } else {
-            for (let q = 0; q < 4; q++) {
-                const c = tree.child[4 * k + q];
+            for (let q = 0; q < 8; q++) {
+                const c = tree.child[8 * k + q];
                 if (c === -1) continue;
                 const cm = tree.mass[c];
                 m += cm;
                 mx += cm * tree.comX[c];
                 my += cm * tree.comY[c];
+                mz += cm * tree.comZ[c];
             }
         }
 
         tree.mass[k] = m;
         tree.comX[k] = m > 0 ? mx / m : tree.cx[k];
         tree.comY[k] = m > 0 ? my / m : tree.cy[k];
+        tree.comZ[k] = m > 0 ? mz / m : tree.cz[k];
     }
 }
 
 /*
- * Walk the tree to find the pull at point (x, y).
+ * Walk the tree to find the pull at point (x, y, z).
  * `self` is the index of the body at that point (so it doesn't pull on
  * itself), or -1 for an empty point. Results go into the walk* variables.
- * If `record` is given, the squares used as single masses and the bodies
- * visited one by one are saved into it (for the tree visualisation).
  */
-let walkAx = 0, walkAy = 0, walkPhi = 0, walkCount = 0, walkGroups = 0;
-const walkStack = new Int32Array(1024);
+let walkAx = 0, walkAy = 0, walkAz = 0, walkPhi = 0;
+const walkStack = new Int32Array(4096);
 
-function walkTree(x, y, self, theta2, eps2, record = null) {
-    const { cx, cy, half, mass, comX, comY, child, leaf, first, next, bx, by, bm } = tree;
+function walkTree(x, y, z, self, theta2, eps2) {
+    const { cx, cy, cz, half, mass, comX, comY, comZ, child, leaf, first, next, bx, by, bz, bm } = tree;
 
-    let ax = 0, ay = 0, phi = 0, count = 0, groups = 0;
+    let ax = 0, ay = 0, az = 0, phi = 0;
     let sp = 0;
     if (tree.count > 0) walkStack[sp++] = 0;
 
@@ -484,14 +516,13 @@ function walkTree(x, y, self, theta2, eps2, record = null) {
                 if (j === self) continue;
                 const dx = bx[j] - x;
                 const dy = by[j] - y;
-                const d2 = dx * dx + dy * dy + eps2;
-                const inv = 1 / Math.sqrt(d2);
+                const dz = bz[j] - z;
+                const inv = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz + eps2);
                 const gm = G * bm[j] * inv;
                 ax += dx * gm * inv * inv;
                 ay += dy * gm * inv * inv;
+                az += dz * gm * inv * inv;
                 phi -= gm;
-                count++;
-                if (record) record.singles.push(j);
             }
             continue;
         }
@@ -499,27 +530,25 @@ function walkTree(x, y, self, theta2, eps2, record = null) {
         const h = half[k];
         const dx = comX[k] - x;
         const dy = comY[k] - y;
-        const dist2 = dx * dx + dy * dy;
+        const dz = comZ[k] - z;
+        const dist2 = dx * dx + dy * dy + dz * dz;
 
-        // Far enough away (square size / distance < theta), and the point
-        // isn't inside this square: treat everything in it as ONE mass
+        // Far enough away (cube size / distance < theta), and the point
+        // isn't inside this cube: treat everything in it as ONE mass
         // sitting at its centre of mass
-        const outside = x < cx[k] - h || x > cx[k] + h || y < cy[k] - h || y > cy[k] + h;
+        const outside = Math.abs(x - cx[k]) > h || Math.abs(y - cy[k]) > h || Math.abs(z - cz[k]) > h;
 
         if (outside && 4 * h * h < theta2 * dist2) {
-            const d2 = dist2 + eps2;
-            const inv = 1 / Math.sqrt(d2);
+            const inv = 1 / Math.sqrt(dist2 + eps2);
             const gm = G * m * inv;
             ax += dx * gm * inv * inv;
             ay += dy * gm * inv * inv;
+            az += dz * gm * inv * inv;
             phi -= gm;
-            count++;
-            groups++;
-            if (record) record.groups.push(k);
         } else {
-            // Too close: open the square and look at its four children
-            const base = 4 * k;
-            for (let q = 0; q < 4; q++) {
+            // Too close: open the cube and look at its eight children
+            const base = 8 * k;
+            for (let q = 0; q < 8; q++) {
                 const c = child[base + q];
                 if (c !== -1) walkStack[sp++] = c;
             }
@@ -528,18 +557,17 @@ function walkTree(x, y, self, theta2, eps2, record = null) {
 
     walkAx = ax;
     walkAy = ay;
+    walkAz = az;
     walkPhi = phi;
-    walkCount = count;
-    walkGroups = groups;
 }
 
 /*
  * The main Barnes-Hut force calculation.
  *
  * Bodies in the same leaf are close together, so they need almost the same
- * list of "far squares" and "nearby bodies". Instead of walking the tree for
+ * list of "far cubes" and "nearby bodies". Instead of walking the tree for
  * every body, we walk it once per leaf (up to 8 bodies) and share the lists.
- * The test for "far enough" uses the leaf body CLOSEST to each square, so
+ * The test for "far enough" uses the leaf body CLOSEST to each cube, so
  * it is at least as accurate as walking separately for each body.
  */
 let groupNodes = new Int32Array(256);
@@ -565,18 +593,21 @@ function pushGroupBody(j) {
     groupBodies[groupBodyCount++] = j;
 }
 
-// Fill groupNodes (squares used as one mass) and groupBodies (bodies used
+// Fill groupNodes (cubes used as one mass) and groupBodies (bodies used
 // one by one) for every body in leaf `L`
 function gatherInteractions(L, theta2) {
-    const { cx, cy, half, mass, comX, comY, child, leaf, first, next, bx, by } = tree;
+    const { cx, cy, cz, half, mass, comX, comY, comZ, child, leaf, first, next, bx, by, bz } = tree;
 
     // The box around the bodies in this leaf
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let j = first[L]; j !== -1; j = next[j]) {
         if (bx[j] < minX) minX = bx[j];
         if (bx[j] > maxX) maxX = bx[j];
         if (by[j] < minY) minY = by[j];
         if (by[j] > maxY) maxY = by[j];
+        if (bz[j] < minZ) minZ = bz[j];
+        if (bz[j] > maxZ) maxZ = bz[j];
     }
 
     groupNodeCount = 0;
@@ -596,19 +627,21 @@ function gatherInteractions(L, theta2) {
 
         const h = half[k];
 
-        // Squares that contain this leaf must always be opened
-        const containsLeaf = Math.abs(cx[L] - cx[k]) < h && Math.abs(cy[L] - cy[k]) < h;
+        // Cubes that contain this leaf must always be opened
+        const containsLeaf = Math.abs(cx[L] - cx[k]) < h && Math.abs(cy[L] - cy[k]) < h &&
+            Math.abs(cz[L] - cz[k]) < h;
 
-        // Distance from the square's centre of mass to the nearest point of the box
+        // Distance from the cube's centre of mass to the nearest point of the box
         const dx = Math.max(minX - comX[k], 0, comX[k] - maxX);
         const dy = Math.max(minY - comY[k], 0, comY[k] - maxY);
-        const dist2 = dx * dx + dy * dy;
+        const dz = Math.max(minZ - comZ[k], 0, comZ[k] - maxZ);
+        const dist2 = dx * dx + dy * dy + dz * dz;
 
         if (!containsLeaf && 4 * h * h < theta2 * dist2) {
             pushGroupNode(k);
         } else {
-            const base = 4 * k;
-            for (let q = 0; q < 4; q++) {
+            const base = 8 * k;
+            for (let q = 0; q < 8; q++) {
                 const c = child[base + q];
                 if (c !== -1) walkStack[sp++] = c;
             }
@@ -621,7 +654,7 @@ function computeForcesTree(list, isMain) {
 
     const theta2 = theta * theta;
     const eps2 = softening * softening;
-    const { leaf, leafCount, first, next, mass, comX, comY, bx, by, bm } = tree;
+    const { leaf, leafCount, first, next, mass, comX, comY, comZ, bx, by, bz, bm } = tree;
     let total = 0;
     let groups = 0;
 
@@ -633,17 +666,20 @@ function computeForcesTree(list, isMain) {
         for (let i = first[L]; i !== -1; i = next[i]) {
             const x = bx[i];
             const y = by[i];
-            let ax = 0, ay = 0, phi = 0;
+            const z = bz[i];
+            let ax = 0, ay = 0, az = 0, phi = 0;
 
-            // Far squares, each as one mass at its centre of mass
+            // Far cubes, each as one mass at its centre of mass
             for (let n = 0; n < groupNodeCount; n++) {
                 const k = groupNodes[n];
                 const dx = comX[k] - x;
                 const dy = comY[k] - y;
-                const inv = 1 / Math.sqrt(dx * dx + dy * dy + eps2);
+                const dz = comZ[k] - z;
+                const inv = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz + eps2);
                 const gm = G * mass[k] * inv;
                 ax += dx * gm * inv * inv;
                 ay += dy * gm * inv * inv;
+                az += dz * gm * inv * inv;
                 phi -= gm;
             }
 
@@ -653,16 +689,19 @@ function computeForcesTree(list, isMain) {
                 if (j === i) continue;
                 const dx = bx[j] - x;
                 const dy = by[j] - y;
-                const inv = 1 / Math.sqrt(dx * dx + dy * dy + eps2);
+                const dz = bz[j] - z;
+                const inv = 1 / Math.sqrt(dx * dx + dy * dy + dz * dz + eps2);
                 const gm = G * bm[j] * inv;
                 ax += dx * gm * inv * inv;
                 ay += dy * gm * inv * inv;
+                az += dz * gm * inv * inv;
                 phi -= gm;
             }
 
             const b = list[i];
             b.ax = ax;
             b.ay = ay;
+            b.az = az;
             b.phi = phi;
             total += groupNodeCount + groupBodyCount - 1;
             groups += groupNodeCount;
@@ -703,8 +742,10 @@ function stepVerlet(list, dt, isMain = false) {
     for (const b of list) {
         b.vx += b.ax * dt / 2;
         b.vy += b.ay * dt / 2;
+        b.vz += b.az * dt / 2;
         b.x += b.vx * dt;
         b.y += b.vy * dt;
+        b.z += b.vz * dt;
     }
 
     computeForces(list, isMain);
@@ -712,6 +753,7 @@ function stepVerlet(list, dt, isMain = false) {
     for (const b of list) {
         b.vx += b.ax * dt / 2;
         b.vy += b.ay * dt / 2;
+        b.vz += b.az * dt / 2;
     }
 }
 
@@ -727,8 +769,10 @@ function stepEuler(list, dt) {
     for (const b of list) {
         b.x += b.vx * dt;
         b.y += b.vy * dt;
+        b.z += b.vz * dt;
         b.vx += b.ax * dt;
         b.vy += b.ay * dt;
+        b.vz += b.az * dt;
     }
 }
 
@@ -758,8 +802,8 @@ function physicsStep() {
  * in reality it becomes heat.
  *
  * Checking every pair would be n^2 again. Instead we "sweep and prune":
- * sort the bodies left to right, then each body only checks the bodies to
- * its right that are close enough horizontally to possibly touch it.
+ * sort the bodies left to right (by x), then each body only checks the
+ * bodies to its right that are close enough in x to possibly touch it.
  */
 // Collisionless bodies (galaxy stars, belt asteroids) never collide with anything
 function canCollide(a, b) {
@@ -800,8 +844,9 @@ function findTouchingPairs() {
             if (!canCollide(a, b)) continue;
             const dx = b.x - a.x;
             const dy = b.y - a.y;
+            const dz = b.z - a.z;
             const touch = a.radius + b.radius;
-            if (dx * dx + dy * dy < touch * touch) pairs.push([a, b]);
+            if (dx * dx + dy * dy + dz * dz < touch * touch) pairs.push([a, b]);
         }
     }
 
@@ -818,10 +863,12 @@ function mergeEnergyChange(a, b) {
     const mu = a.mass * b.mass / (a.mass + b.mass);
     const dvx = a.vx - b.vx;
     const dvy = a.vy - b.vy;
+    const dvz = a.vz - b.vz;
     const dx = a.x - b.x;
     const dy = a.y - b.y;
-    const r = Math.sqrt(dx * dx + dy * dy + softening * softening);
-    return -0.5 * mu * (dvx * dvx + dvy * dvy) + G * a.mass * b.mass / r;
+    const dz = a.z - b.z;
+    const r = Math.sqrt(dx * dx + dy * dy + dz * dz + softening * softening);
+    return -0.5 * mu * (dvx * dvx + dvy * dvy + dvz * dvz) + G * a.mass * b.mass / r;
 }
 
 function mergeBodies(a, b) {
@@ -833,8 +880,10 @@ function mergeBodies(a, b) {
     // Centre of mass position and momentum-conserving velocity
     big.x = (a.x * a.mass + b.x * b.mass) / totalMass;
     big.y = (a.y * a.mass + b.y * b.mass) / totalMass;
+    big.z = (a.z * a.mass + b.z * b.mass) / totalMass;
     big.vx = (a.vx * a.mass + b.vx * b.mass) / totalMass;
     big.vy = (a.vy * a.mass + b.vy * b.mass) / totalMass;
+    big.vz = (a.vz * a.mass + b.vz * b.mass) / totalMass;
     big.mass = totalMass;
 
     // Volumes add, so the new radius is the cube root of the summed cubes
@@ -842,11 +891,11 @@ function mergeBodies(a, b) {
 
     // Big systems: no flash for tiny bodies merging (there are hundreds)
     const notable = bodies.length <= 300 || !SMALL_TYPES.has(small.type);
-    if (notable) effects.push({ x: big.x, y: big.y, radius: big.radius, age: 0, color: small.color });
+    if (notable) effects.push({ x: big.x, y: big.y, z: big.z, radius: big.radius, age: 0, color: small.color });
 
     small.dead = true;
     if (selectedBody === small) selectedBody = big;
-    if (camera.target === small) camera.target = big;
+    if (camera.followed === small) camera.followed = big;
     if (referenceId === small.id) referenceId = big.id;
     return { energyChange, notable };
 }
@@ -907,7 +956,7 @@ function measureEnergy(list) {
     const eps2 = softening * softening;
 
     for (const b of list) {
-        kinetic += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
+        kinetic += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
     }
 
     for (let i = 0; i < list.length; i++) {
@@ -916,7 +965,8 @@ function measureEnergy(list) {
             const b = list[j];
             const dx = b.x - a.x;
             const dy = b.y - a.y;
-            potential -= G * a.mass * b.mass / Math.sqrt(dx * dx + dy * dy + eps2);
+            const dz = b.z - a.z;
+            potential -= G * a.mass * b.mass / Math.sqrt(dx * dx + dy * dy + dz * dz + eps2);
         }
     }
 
@@ -932,7 +982,7 @@ function measureEnergyFast() {
     let kinetic = 0;
     let potential = 0;
     for (const b of bodies) {
-        kinetic += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy);
+        kinetic += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
         potential += 0.5 * b.mass * b.phi;
     }
     return { kinetic, potential, total: kinetic + potential };
@@ -969,33 +1019,36 @@ function energyDriftPercent() {
 }
 
 function centerOfMass() {
-    let mx = 0, my = 0, m = 0;
+    let mx = 0, my = 0, mz = 0, m = 0;
     for (const b of bodies) {
         mx += b.x * b.mass;
         my += b.y * b.mass;
+        mz += b.z * b.mass;
         m += b.mass;
     }
-    return m > 0 ? { x: mx / m, y: my / m } : { x: 0, y: 0 };
+    return m > 0 ? { x: mx / m, y: my / m, z: mz / m } : { x: 0, y: 0, z: 0 };
 }
 
 // Shift every velocity so total momentum is zero.
 // Otherwise the whole system slowly drifts off screen.
 function zeroMomentum() {
-    let px = 0, py = 0, m = 0;
+    let px = 0, py = 0, pz = 0, m = 0;
     for (const b of bodies) {
         px += b.mass * b.vx;
         py += b.mass * b.vy;
+        pz += b.mass * b.vz;
         m += b.mass;
     }
     if (m === 0) return;
     for (const b of bodies) {
         b.vx -= px / m;
         b.vy -= py / m;
+        b.vz -= pz / m;
     }
 }
 
-// Which body pulls hardest on the point (x, y)?
-function dominantAttractor(x, y, exclude) {
+// Which body pulls hardest on the point (x, y, z)?
+function dominantAttractor(x, y, z, exclude) {
     let best = null;
     let bestPull = 0;
     const eps2 = softening * softening;
@@ -1004,7 +1057,8 @@ function dominantAttractor(x, y, exclude) {
         if (b === exclude) continue;
         const dx = b.x - x;
         const dy = b.y - y;
-        const pull = b.mass / (dx * dx + dy * dy + eps2);
+        const dz = b.z - z;
+        const pull = b.mass / (dx * dx + dy * dy + dz * dz + eps2);
         if (pull > bestPull) {
             bestPull = pull;
             best = b;
@@ -1014,27 +1068,49 @@ function dominantAttractor(x, y, exclude) {
 }
 
 /*
- * Velocity for a circular orbit around `attractor`.
+ * Which way orbits go round. An orbit spins around an axis; by the
+ * "right-hand rule", curl your right hand's fingers along the motion and your
+ * thumb points along the axis. z points up (out of the flat x-y plane), so:
+ *   axis pointing down (-z): clockwise when seen from above
+ *   axis pointing up (+z):   anticlockwise when seen from above
+ * The scenarios were all designed with clockwise orbits.
+ */
+const CLOCKWISE = { x: 0, y: 0, z: -1 };
+const ANTICLOCKWISE = { x: 0, y: 0, z: 1 };
+
+/*
+ * Velocity for a circular orbit around `attractor`, for a body at `point`.
  * Circular motion needs  v^2 / r = gravity, so v = sqrt(G (M + m) / r).
  * (The extra factors account for softening so the orbit is truly circular.)
- * The direction is perpendicular to the line joining the two bodies:
- * direction = 1 goes anticlockwise on screen, -1 clockwise.
+ * The direction is sideways to both the line joining the two bodies and the
+ * orbit's axis: the "cross product"  axis x (point - attractor).
  */
-function circularVelocity(x, y, mass, attractor, direction = 1) {
-    const dx = x - attractor.x;
-    const dy = y - attractor.y;
-    const r = Math.hypot(dx, dy);
+function circularVelocity(point, mass, attractor, axis = CLOCKWISE) {
+    const dx = point.x - attractor.x;
+    const dy = point.y - attractor.y;
+    const dz = point.z - attractor.z;
+    const r = Math.hypot(dx, dy, dz);
 
-    if (r < 1e-6) return { vx: attractor.vx, vy: attractor.vy };
+    if (r < 1e-6) return { vx: attractor.vx, vy: attractor.vy, vz: attractor.vz };
 
     const totalMass = attractor.mass + mass;
     const speed = Math.sqrt(
         G * totalMass * r * r / Math.pow(r * r + softening * softening, 1.5)
     );
 
+    let sx = axis.y * dz - axis.z * dy;
+    let sy = axis.z * dx - axis.x * dz;
+    let sz = axis.x * dy - axis.y * dx;
+    let length = Math.hypot(sx, sy, sz);
+    if (length < 1e-9) {
+        // Straight above or below the attractor: any sideways direction works
+        sx = 1; sy = 0; sz = 0; length = 1;
+    }
+
     return {
-        vx: attractor.vx + direction * speed * dy / r,
-        vy: attractor.vy - direction * speed * dx / r
+        vx: attractor.vx + speed * sx / length,
+        vy: attractor.vy + speed * sy / length,
+        vz: attractor.vz + speed * sz / length
     };
 }
 
@@ -1045,7 +1121,7 @@ function referenceBody(body) {
         const chosen = bodies.find(b => b.id === referenceId);
         if (chosen) return chosen;
     }
-    return dominantAttractor(body.x, body.y, body);
+    return dominantAttractor(body.x, body.y, body.z, body);
 }
 
 /*
@@ -1062,6 +1138,9 @@ function referenceBody(body) {
  *   eccentricity vector    e = ((v^2 - mu/r) r - (r . v) v) / mu
  *     its length is how stretched the ellipse is (0 = circle, near 1 = very
  *     long), and it points from `other` to the closest point of the orbit.
+ *   angular momentum       h = r x v
+ *     points along the orbit's axis, so the orbit lies flat in the plane
+ *     perpendicular to it (it's conserved, so the plane never changes).
  *
  * r and v are measured relative to `other`. This uses plain r, not the
  * softened r^2 + eps^2, because that's the textbook formula; far from the
@@ -1071,10 +1150,12 @@ function orbitAround(body, other) {
     const mu = G * (body.mass + other.mass);
     const rx = body.x - other.x;
     const ry = body.y - other.y;
+    const rz = body.z - other.z;
     const vx = body.vx - other.vx;
     const vy = body.vy - other.vy;
-    const r = Math.hypot(rx, ry);
-    const v = Math.hypot(vx, vy);
+    const vz = body.vz - other.vz;
+    const r = Math.hypot(rx, ry, rz);
+    const v = Math.hypot(vx, vy, vz);
 
     const energy = v * v / 2 - mu / r;
     const orbit = {
@@ -1088,10 +1169,14 @@ function orbitAround(body, other) {
     if (orbit.bound) {
         orbit.a = -mu / (2 * energy);
         orbit.period = 2 * Math.PI * Math.sqrt(orbit.a ** 3 / mu);
-        const rDotV = rx * vx + ry * vy;
+        const rDotV = rx * vx + ry * vy + rz * vz;
         orbit.ex = ((v * v - mu / r) * rx - rDotV * vx) / mu;
         orbit.ey = ((v * v - mu / r) * ry - rDotV * vy) / mu;
-        orbit.e = Math.hypot(orbit.ex, orbit.ey);
+        orbit.ez = ((v * v - mu / r) * rz - rDotV * vz) / mu;
+        orbit.e = Math.hypot(orbit.ex, orbit.ey, orbit.ez);
+        orbit.hx = ry * vz - rz * vy;
+        orbit.hy = rz * vx - rx * vz;
+        orbit.hz = rx * vy - ry * vx;
     }
     return orbit;
 }
@@ -1106,20 +1191,20 @@ function predictPath(start, velocity) {
     const preset = BODY_TYPES[brush];
 
     const sim = bodies.map(b => ({
-        x: b.x, y: b.y, vx: b.vx, vy: b.vy,
-        ax: 0, ay: 0, mass: b.mass, radius: b.radius
+        x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz,
+        ax: 0, ay: 0, az: 0, mass: b.mass, radius: b.radius, collisionless: b.collisionless
     }));
 
     const probe = {
-        x: start.x, y: start.y,
-        vx: velocity.vx, vy: velocity.vy,
-        ax: 0, ay: 0, mass: preset.mass, radius: preset.radius
+        x: start.x, y: start.y, z: start.z,
+        vx: velocity.vx, vy: velocity.vy, vz: velocity.vz,
+        ax: 0, ay: 0, az: 0, mass: preset.mass, radius: preset.radius
     };
     sim.push(probe);
 
     const n = sim.length;
     const steps = Math.max(200, Math.min(1500, Math.floor(600000 / (n * n))));
-    const points = [{ x: probe.x, y: probe.y }];
+    const points = [{ x: probe.x, y: probe.y, z: probe.z }];
     let hit = null;
 
     computeForces(sim);
@@ -1132,23 +1217,25 @@ function predictPath(start, velocity) {
             computeForces(sim);
         }
 
-        if (s % 3 === 0) points.push({ x: probe.x, y: probe.y });
+        if (s % 3 === 0) points.push({ x: probe.x, y: probe.y, z: probe.z });
 
         if (options.merge) {
             for (let k = 0; k < n - 1; k++) {
                 const o = sim[k];
+                if (o.collisionless) continue;
                 const dx = o.x - probe.x;
                 const dy = o.y - probe.y;
+                const dz = o.z - probe.z;
                 const touch = o.radius + probe.radius;
-                if (dx * dx + dy * dy < touch * touch) {
-                    hit = { x: probe.x, y: probe.y };
+                if (dx * dx + dy * dy + dz * dz < touch * touch) {
+                    hit = { x: probe.x, y: probe.y, z: probe.z };
                     break;
                 }
             }
         }
     }
 
-    points.push({ x: probe.x, y: probe.y });
+    points.push({ x: probe.x, y: probe.y, z: probe.z });
     return { points, hit };
 }
 
@@ -1164,42 +1251,48 @@ function predictPathFrozen(start, velocity) {
     const preset = BODY_TYPES[brush];
     const theta2 = 0.8 * 0.8;
     const eps2 = softening * softening;
-    const obstacles = bodies.filter(b => b.radius >= 2);
+    const obstacles = bodies.filter(b => b.radius >= 2 && !b.collisionless);
 
-    let x = start.x, y = start.y, vx = velocity.vx, vy = velocity.vy;
-    walkTree(x, y, -1, theta2, eps2);
-    let ax = walkAx, ay = walkAy;
+    let x = start.x, y = start.y, z = start.z;
+    let vx = velocity.vx, vy = velocity.vy, vz = velocity.vz;
+    walkTree(x, y, z, -1, theta2, eps2);
+    let ax = walkAx, ay = walkAy, az = walkAz;
 
-    const points = [{ x, y }];
+    const points = [{ x, y, z }];
     let hit = null;
 
     for (let s = 0; s < 600 && !hit; s++) {
         vx += ax * timeStep / 2;
         vy += ay * timeStep / 2;
+        vz += az * timeStep / 2;
         x += vx * timeStep;
         y += vy * timeStep;
-        walkTree(x, y, -1, theta2, eps2);
+        z += vz * timeStep;
+        walkTree(x, y, z, -1, theta2, eps2);
         ax = walkAx;
         ay = walkAy;
+        az = walkAz;
         vx += ax * timeStep / 2;
         vy += ay * timeStep / 2;
+        vz += az * timeStep / 2;
 
-        if (s % 3 === 0) points.push({ x, y });
+        if (s % 3 === 0) points.push({ x, y, z });
 
         if (options.merge) {
             for (const o of obstacles) {
                 const dx = o.x - x;
                 const dy = o.y - y;
+                const dz = o.z - z;
                 const touch = o.radius + preset.radius;
-                if (dx * dx + dy * dy < touch * touch) {
-                    hit = { x, y };
+                if (dx * dx + dy * dy + dz * dz < touch * touch) {
+                    hit = { x, y, z };
                     break;
                 }
             }
         }
     }
 
-    points.push({ x, y });
+    points.push({ x, y, z });
     return { points, hit };
 }
 
@@ -1214,15 +1307,39 @@ function addBody(props) {
     return body;
 }
 
-// Place a body on a circular orbit around `attractor`.
-function addOrbiting(type, attractor, distance, angleDegrees, props = {}) {
-    const angle = angleDegrees * Math.PI / 180;
-    const x = attractor.x + distance * Math.cos(angle);
-    const y = attractor.y + distance * Math.sin(angle);
-    const mass = props.mass ?? BODY_TYPES[type].mass;
-    const v = circularVelocity(x, y, mass, attractor);
+// Turn the vector (x, y, z) around the x axis by `angle` radians
+function rotateAroundX(v, angle) {
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    return { x: v.x, y: v.y * c - v.z * s, z: v.y * s + v.z * c };
+}
 
-    return addBody({ type, x, y, vx: v.vx, vy: v.vy, ...props });
+// Turn the vector (x, y, z) around the z axis (spinning it flat) by `angle` radians
+function rotateAroundZ(v, angle) {
+    const c = Math.cos(angle);
+    const s = Math.sin(angle);
+    return { x: v.x * c - v.y * s, y: v.x * s + v.y * c, z: v.z };
+}
+
+/*
+ * Place a body on a circular orbit around `attractor`, `distance` away and
+ * `angleDegrees` of the way round. `tiltDegrees` tips the orbit out of the
+ * flat x-y plane, like the small tilts of the real planets' orbits. It tips
+ * around a line through the attractor (the "line of nodes", where the orbit
+ * crosses the flat plane), which points `nodeDegrees` round from the x axis.
+ */
+function addOrbiting(type, attractor, distance, angleDegrees, props = {}, tiltDegrees = 0, nodeDegrees = 0) {
+    const angle = (angleDegrees - nodeDegrees) * Math.PI / 180;
+    const tilt = tiltDegrees * Math.PI / 180;
+    const node = nodeDegrees * Math.PI / 180;
+    const flat = { x: distance * Math.cos(angle), y: distance * Math.sin(angle), z: 0 };
+    const offset = rotateAroundZ(rotateAroundX(flat, tilt), node);
+    const axis = rotateAroundZ(rotateAroundX(CLOCKWISE, tilt), node);
+    const point = { x: attractor.x + offset.x, y: attractor.y + offset.y, z: attractor.z + offset.z };
+    const mass = props.mass ?? BODY_TYPES[type].mass;
+    const v = circularVelocity(point, mass, attractor, axis);
+
+    return addBody({ type, ...point, vx: v.vx, vy: v.vy, vz: v.vz, ...props });
 }
 
 // Small seeded random number generator so "random" presets look
@@ -1241,9 +1358,10 @@ function seededRandom(seed) {
  * A disk galaxy: a central black hole and a spinning disk of stars.
  * Each star gets the speed for a circular orbit around everything closer to
  * the centre than it is (the black hole plus the inner stars).
- * spin = 1 for counter-clockwise (in maths terms), -1 for clockwise.
+ * spin = 1 for anticlockwise seen from above, -1 for clockwise.
+ * tilt (radians) tips the disk out of the x-y plane, around the x axis.
  */
-function makeGalaxy({ name, x, y, vx, vy, spin, colors, blackHoleMass, starsPerGalaxy, random }) {
+function makeGalaxy({ name, x, y, vx, vy, spin, tilt, colors, blackHoleMass, starsPerGalaxy, random }) {
     addBody({ type: "blackhole", name: name + " core", x, y, vx, vy, mass: blackHoleMass, radius: 6 });
 
     const starMass = BODY_TYPES.galaxyStar.mass;
@@ -1272,16 +1390,25 @@ function makeGalaxy({ name, x, y, vx, vy, spin, colors, blackHoleMass, starsPerG
             G * enclosed * r * r / Math.pow(r * r + softening * softening, 1.5)
         );
 
-        // A little random motion (2%), like real stars
+        // A little random motion (2%), like real stars, and a little
+        // thickness: real disks are thin, but not perfectly flat
         const wobble = () => (random() - 0.5) * 0.04 * circular;
+        const offset = rotateAroundX({ x: dx, y: dy, z: (random() - 0.5) * 0.04 * r }, tilt);
+        const motion = rotateAroundX({
+            x: -spin * circular * dy / r + wobble(),
+            y: spin * circular * dx / r + wobble(),
+            z: wobble()
+        }, tilt);
 
         addBody({
             type: "galaxyStar",
             name: name + " star " + (i + 1),
-            x: x + dx,
-            y: y + dy,
-            vx: vx - spin * circular * dy / r + wobble(),
-            vy: vy + spin * circular * dx / r + wobble(),
+            x: x + offset.x,
+            y: y + offset.y,
+            z: offset.z,
+            vx: vx + motion.x,
+            vy: vy + motion.y,
+            vz: motion.z,
             color: colors[i % colors.length]
         });
     });
@@ -1294,13 +1421,14 @@ const SCENARIOS = {
         note: "A star with five planets and a moon. Switch the integrator to Euler and watch the inner planet spiral outward.",
         build() {
             // Spacing tested to stay stable for several minutes of real time
+            // Orbits tilted by a few degrees, like the real planets' (Mercury: 7)
             const sun = addBody({ type: "star", name: "Sol", x: 0, y: 0 });
-            addOrbiting("planet", sun, 70, 20, { name: "Cinder", mass: 3, radius: 5, color: "#fb923c" });
-            addOrbiting("planet", sun, 110, 140, { name: "Rosa", mass: 6, radius: 7, color: "#f472b6" });
-            addOrbiting("planet", sun, 155, 250, { name: "Azure", mass: 8, radius: 8, color: "#38bdf8" });
-            addOrbiting("planet", sun, 215, 60, { name: "Frost", mass: 12, radius: 9, color: "#a5f3fc" });
-            const giant = addOrbiting("planet", sun, 360, 330, { name: "Goliath", mass: 150, radius: 12, color: "#e7c59a" });
-            addOrbiting("moon", giant, 22, 0, { name: "Pebble", mass: 0.5, radius: 3 });
+            addOrbiting("planet", sun, 70, 20, { name: "Cinder", mass: 3, radius: 5, color: "#fb923c" }, 7);
+            addOrbiting("planet", sun, 110, 140, { name: "Rosa", mass: 6, radius: 7, color: "#f472b6" }, -3);
+            addOrbiting("planet", sun, 155, 250, { name: "Azure", mass: 8, radius: 8, color: "#38bdf8" }, 1);
+            addOrbiting("planet", sun, 215, 60, { name: "Frost", mass: 12, radius: 9, color: "#a5f3fc" }, -5);
+            const giant = addOrbiting("planet", sun, 360, 330, { name: "Goliath", mass: 150, radius: 12, color: "#e7c59a" }, 4);
+            addOrbiting("moon", giant, 22, 0, { name: "Pebble", mass: 0.5, radius: 3 }, 25);
         }
     },
 
@@ -1328,9 +1456,9 @@ const SCENARIOS = {
             addBody({ type: "star", name: "Helios B", x: separation / 2, y: 0, vy: -relativeSpeed / 2, mass: each, radius: 18, color: "#93c5fd" });
 
             // Far away, the pair pulls like one big mass at the centre
-            const pair = { x: 0, y: 0, vx: 0, vy: 0, mass: 2 * each };
-            addOrbiting("planet", pair, 450, 200, { name: "Duo", color: "#34d399" });
-            addOrbiting("planet", pair, 600, 30, { name: "Far Duo", color: "#a78bfa" });
+            const pair = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, mass: 2 * each };
+            addOrbiting("planet", pair, 450, 200, { name: "Duo", color: "#34d399" }, 8);
+            addOrbiting("planet", pair, 600, 30, { name: "Far Duo", color: "#a78bfa" }, -12);
         }
     },
 
@@ -1362,11 +1490,11 @@ const SCENARIOS = {
             // and picking the one where the probe gains the most energy.
             addOrbiting("planet", sun, 260, 283, { name: "Giant", mass: 400, radius: 14, color: "#e7c59a" });
 
-            const probeStart = { x: 110, y: 0 };
-            const circular = circularVelocity(probeStart.x, probeStart.y, 0.01, sun);
+            const probeStart = { x: 110, y: 0, z: 0 };
+            const circular = circularVelocity(probeStart, 0.01, sun);
             addBody({
-                type: "moon", name: "Probe", x: probeStart.x, y: probeStart.y,
-                vx: circular.vx * 1.25, vy: circular.vy * 1.25,
+                type: "moon", name: "Probe", ...probeStart,
+                vx: circular.vx * 1.25, vy: circular.vy * 1.25, vz: 0,
                 mass: 0.01, radius: 3, color: "#4ade80"
             });
         }
@@ -1378,6 +1506,7 @@ const SCENARIOS = {
         build() {
             const hole = addBody({ type: "blackhole", name: "Black Hole", x: 0, y: 0 });
             const random = seededRandom(7);
+            const tilts = seededRandom(8);   // separate, so the disk is the same as in 2D
 
             for (let i = 0; i < 40; i++) {
                 const distance = 110 + random() * 190;
@@ -1386,35 +1515,46 @@ const SCENARIOS = {
                     mass: 1,
                     radius: 3,
                     color: PLANET_COLORS[i % PLANET_COLORS.length]
-                });
+                }, (tilts() - 0.5) * 8, tilts() * 360);
             }
 
             // Intruder star starts at the far point of an ellipse
-            // whose closest approach skims the edge of the disk.
+            // whose closest approach skims the edge of the disk. Its orbit
+            // is tilted 30 degrees, so it swoops through from above.
             const starMass = 8000;
             const start = 1000;
             const closest = 330;
             const semiMajor = (start + closest) / 2;
             const speed = Math.sqrt(G * (hole.mass + starMass) * (2 / start - 1 / semiMajor));
-            addBody({ type: "star", name: "Intruder", x: -start, y: 0, vx: 0, vy: speed, mass: starMass, radius: 20, color: "#fca5a5" });
+            const velocity = rotateAroundX({ x: 0, y: speed, z: 0 }, 30 * Math.PI / 180);
+            addBody({
+                type: "star", name: "Intruder", x: -start, y: 0,
+                vx: velocity.x, vy: velocity.y, vz: velocity.z,
+                mass: starMass, radius: 20, color: "#fca5a5"
+            });
         }
     },
 
     cluster: {
         fit: 380,
-        note: "Thirty random planets with a slight spin. Gravity pulls them together, they collide and merge, and a few survivors end up orbiting the biggest.",
+        note: "Forty random planets in a slowly spinning ball. Gravity pulls them together, they collide and merge, and the survivors settle into orbits around the biggest. Rotate the view: the ball flattens as it spins.",
         build() {
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 40; i++) {
+                // A random direction (an even spread over a sphere), and a
+                // distance spread evenly through the ball's volume
+                const z = Math.random() * 2 - 1;
                 const angle = Math.random() * Math.PI * 2;
-                const distance = 40 + Math.sqrt(Math.random()) * 260;
-                const x = distance * Math.cos(angle);
-                const y = distance * Math.sin(angle);
+                const flat = Math.sqrt(1 - z * z);
+                const distance = 40 + Math.cbrt(Math.random()) * 240;
+                const x = distance * flat * Math.cos(angle);
+                const y = distance * flat * Math.sin(angle);
                 const mass = 20 + Math.random() * 180;
 
                 addBody({
-                    type: "planet", x, y,
+                    type: "planet", x, y, z: distance * z,
                     vx: y * 0.012 + (Math.random() - 0.5) * 0.6,
                     vy: -x * 0.012 + (Math.random() - 0.5) * 0.6,
+                    vz: (Math.random() - 0.5) * 0.6,
                     mass,
                     radius: 3 + Math.cbrt(mass) * 1.1
                 });
@@ -1428,6 +1568,7 @@ const SCENARIOS = {
         build() {
             const sun = addBody({ type: "star", name: "Young Sun", x: 0, y: 0, radius: 18 });
             const random = seededRandom(3);
+            const heights = seededRandom(4);   // separate, so the disk is the same as in 2D
             const rockColors = ["#a8a29e", "#d6d3d1", "#c2410c", "#a16207", "#78716c"];
 
             for (let i = 0; i < 1500; i++) {
@@ -1436,14 +1577,16 @@ const SCENARIOS = {
                 const angle = random() * Math.PI * 2;
                 const x = distance * Math.cos(angle);
                 const y = distance * Math.sin(angle);
+                // A thin disk: rocks bob up to 1.5 above and below the middle
+                const z = (heights() - 0.5) * 3;
 
                 // Nearly circular orbits, with a 3% random wobble so orbits cross
-                const v = circularVelocity(x, y, 0.1, sun);
+                const v = circularVelocity({ x, y, z }, 0.1, sun);
                 const speed = Math.hypot(v.vx, v.vy);
                 addBody({
                     type: "rock",
                     name: "Rock " + (i + 1),
-                    x, y,
+                    x, y, z,
                     vx: v.vx + (random() - 0.5) * 0.06 * speed,
                     vy: v.vy + (random() - 0.5) * 0.06 * speed,
                     color: rockColors[i % rockColors.length]
@@ -1460,7 +1603,7 @@ const SCENARIOS = {
         // black holes get kicks too sharp for the time step, and energy drifts
         // by ~5% instead of ~0.4%.
         softening: 15,
-        note: "Two spiral galaxies, each a black hole with 1,500 stars, swing past each other. The blue one spins the same way it's moving (prograde) and gets pulled into long tidal tails; the gold one spins the other way (retrograde) and stays mostly intact, as Toomre & Toomre showed in 1972. They're bound together, so they fall back through each other. Scroll out to follow the tails.",
+        note: "Two spiral galaxies, each a black hole with 1,500 stars, swing past each other. The blue one spins the same way it's moving (prograde) and gets pulled into long tidal tails; the gold one spins the other way (retrograde) and stays mostly intact, as Toomre & Toomre showed in 1972. They're bound together, so they fall back through each other. The disks are tilted differently, as in real collisions: rotate the view to see the tails in 3D. Scroll out to follow them.",
         build() {
             const random = seededRandom(11);
             const blackHoleMass = 12000;
@@ -1499,6 +1642,7 @@ const SCENARIOS = {
                 x: -relPos.x / 2, y: -relPos.y / 2,
                 vx: -relVel.x / 2, vy: -relVel.y / 2,
                 spin: 1,   // same direction as the orbit: prograde
+                tilt: 0.25,
                 colors: ["#93c5fd", "#e0f2fe", "#a5b4fc"],
                 blackHoleMass, starsPerGalaxy, random
             });
@@ -1507,6 +1651,7 @@ const SCENARIOS = {
                 x: relPos.x / 2, y: relPos.y / 2,
                 vx: relVel.x / 2, vy: relVel.y / 2,
                 spin: -1,  // opposite direction: retrograde
+                tilt: -0.9,
                 colors: ["#fcd34d", "#fdba74", "#fef3c7"],
                 blackHoleMass, starsPerGalaxy, random
             });
@@ -1533,6 +1678,7 @@ const SCENARIOS = {
              * everything. (Asteroids you place yourself do collide.)
              */
             const random = seededRandom(5);
+            const tilts = seededRandom(6);   // separate, so the belt is the same as in 2D
             const asteroidColors = ["#9ca3af", "#a8a29e", "#78716c", "#b8a48c"];
             for (let i = 0; i < 180; i++) {
                 addOrbiting("asteroid", sun, 215 + random() * 50, random() * 360, {
@@ -1544,12 +1690,11 @@ const SCENARIOS = {
                     radius: 1.2 + random() * 1.6,
                     color: asteroidColors[i % asteroidColors.length],
                     collisionless: true
-                });
+                }, (tilts() - 0.5) * 14, tilts() * 360);  // real belt asteroids: tilted by up to ~10 degrees
             }
 
-            // A comet crosses every planet's path twice per lap, so sooner or
-            // later it hits one. These starting angles were picked by testing:
-            // the comet survives 20+ laps (over 3 minutes at 1x).
+            // A comet's path can cross the planets', so it might hit one.
+            // These starting angles were picked by testing so it lasts many laps.
             addOrbiting("planet", sun, 420, 20, { name: "Goliath", mass: 40, radius: 11, color: "#e7c59a" });
 
             /*
@@ -1565,7 +1710,12 @@ const SCENARIOS = {
             const a = (farthest + closest) / 2;
             const inside = bodies.reduce((total, b) => total + b.mass, 0);
             const speed = Math.sqrt(G * inside * (2 / farthest - 1 / a));
-            addBody({ type: "comet", name: "Comet Halley", x: -farthest, y: 0, vx: 0, vy: speed });
+            // Comets' orbits are often steeply tilted (Halley's: 162 degrees)
+            const velocity = rotateAroundX({ x: 0, y: speed, z: 0 }, 25 * Math.PI / 180);
+            addBody({
+                type: "comet", name: "Comet Halley", x: -farthest, y: 0,
+                vx: velocity.x, vy: velocity.y, vz: velocity.z
+            });
         }
     },
 
@@ -1604,6 +1754,7 @@ function loadScenario(name) {
 
     scenario.build();
     zeroMomentum();
+    resetViewAngle();
     fitView(scenario.fit);
 
     running = true;
@@ -1620,13 +1771,38 @@ function loadScenario(name) {
    4. CAMERA
    ========================================================================== */
 
+/*
+ * The 3D view is drawn with Three.js (see lib/three.min.js, MIT licence).
+ * Our own code decides what goes where; Three.js turns that into triangles
+ * and pixels on the graphics card (WebGL).
+ *
+ * The camera circles around the point it looks at (camera.x, y, z) like a
+ * satellite: `distance` away, turned `yaw` around the vertical z axis, and
+ * raised `pitch` above the flat x-y plane (90 degrees = looking straight down).
+ */
+const FOV = 45;                              // how wide the camera sees, top to bottom, in degrees
+const DEFAULT_YAW = -Math.PI / 2;
+const DEFAULT_PITCH = 55 * Math.PI / 180;
+const MAX_PITCH = 89.5 * Math.PI / 180;      // exactly 90 would make "up" on screen undefined
+const MIN_DISTANCE = 10;
+const MAX_DISTANCE = 60000;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setClearColor(0x02040b);
+const scene = new THREE.Scene();
+const view = new THREE.PerspectiveCamera(FOV, 1, 1, 1e6);
+view.up.set(0, 0, 1); // z is up
+const projectScreen = new THREE.Matrix4(); // turns world positions into screen positions
+
 function resizeCanvas() {
     pixelRatio = window.devicePixelRatio || 1;
     viewWidth = canvas.clientWidth;
     viewHeight = canvas.clientHeight;
-    canvas.width = Math.round(viewWidth * pixelRatio);
-    canvas.height = Math.round(viewHeight * pixelRatio);
-    buildStarfield();
+    renderer.setPixelRatio(pixelRatio);
+    renderer.setSize(viewWidth, viewHeight, false);
+    view.aspect = viewWidth / Math.max(1, viewHeight);
+    overlay.width = Math.round(viewWidth * pixelRatio);
+    overlay.height = Math.round(viewHeight * pixelRatio);
 }
 
 function resizeEnergyChart() {
@@ -1634,72 +1810,135 @@ function resizeEnergyChart() {
     energyCanvas.height = Math.round(energyCanvas.clientHeight * pixelRatio);
 }
 
-function screenToWorld(sx, sy) {
-    return {
-        x: (sx - viewWidth / 2) / camera.zoom + camera.x,
-        y: (sy - viewHeight / 2) / camera.zoom + camera.y
-    };
-}
-
-function worldToScreen(x, y) {
-    return {
-        x: (x - camera.x) * camera.zoom + viewWidth / 2,
-        y: (y - camera.y) * camera.zoom + viewHeight / 2
-    };
-}
-
-// Draw in world coordinates (zoom + pan applied)
-function useWorldTransform() {
-    const s = pixelRatio * camera.zoom;
-    ctx.setTransform(
-        s, 0, 0, s,
-        pixelRatio * (viewWidth / 2 - camera.x * camera.zoom),
-        pixelRatio * (viewHeight / 2 - camera.y * camera.zoom)
+// Put the Three.js camera where our camera settings say
+function updateView() {
+    const flat = Math.cos(camera.pitch);
+    view.position.set(
+        camera.x + camera.distance * flat * Math.cos(camera.yaw),
+        camera.y + camera.distance * flat * Math.sin(camera.yaw),
+        camera.z + camera.distance * Math.sin(camera.pitch)
     );
+    view.lookAt(camera.x, camera.y, camera.z);
+    // Only things between `near` and `far` get drawn
+    view.near = camera.distance / 200;
+    view.far = camera.distance * 200 + 20000;
+    view.updateProjectionMatrix();
+    view.updateMatrixWorld();
+    projectScreen.multiplyMatrices(view.projectionMatrix, view.matrixWorldInverse);
 }
 
-// Draw in screen pixels (for text and overlays)
-function useScreenTransform() {
-    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+/*
+ * Where a point appears on screen, in pixels. `scale` is how many pixels one
+ * unit of length covers at that distance (far things look smaller).
+ * Returns null for points behind the camera.
+ */
+function project(x, y, z) {
+    const e = projectScreen.elements;
+    const w = e[3] * x + e[7] * y + e[11] * z + e[15]; // distance in front of the camera
+    if (w <= 1e-6) return null;
+    const cx = e[0] * x + e[4] * y + e[8] * z + e[12];
+    const cy = e[1] * x + e[5] * y + e[9] * z + e[13];
+    return {
+        x: (cx / w + 1) / 2 * viewWidth,
+        y: (1 - cy / w) / 2 * viewHeight,
+        scale: view.projectionMatrix.elements[5] * viewHeight / 2 / w
+    };
+}
+
+/*
+ * The opposite: which point of the flat plane at height `planeZ` is under
+ * the pixel (sx, sy)? Follows the ray from the camera through that pixel
+ * until it hits the plane. null if it never does (looking away from it).
+ */
+function screenToPlane(sx, sy, planeZ = 0) {
+    const ray = new THREE.Vector3(sx / viewWidth * 2 - 1, 1 - sy / viewHeight * 2, 0.5);
+    ray.unproject(view).sub(view.position).normalize();
+    if (Math.abs(ray.z) < 1e-4) return null;
+    const t = (planeZ - view.position.z) / ray.z;
+    if (t <= 0 || t > view.far) return null;
+    return { x: view.position.x + ray.x * t, y: view.position.y + ray.y * t, z: planeZ };
+}
+
+// Length of one screen pixel, measured at the point the camera looks at
+function worldPerPixel() {
+    return 2 * camera.distance * Math.tan(FOV * Math.PI / 360) / Math.max(1, viewHeight);
+}
+
+// Dragging sideways spins the view around the vertical axis; up and down tips it
+function rotateView(dx, dy) {
+    camera.yaw -= dx * 0.006;
+    camera.pitch = clamp(camera.pitch + dy * 0.006, -MAX_PITCH, MAX_PITCH);
+}
+
+// Slide the view sideways, so the scene follows the mouse
+function panView(dx, dy) {
+    const step = worldPerPixel();
+    const right = new THREE.Vector3().setFromMatrixColumn(view.matrixWorld, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(view.matrixWorld, 1);
+    camera.x += (-dx * right.x + dy * up.x) * step;
+    camera.y += (-dx * right.y + dy * up.y) * step;
+    camera.z += (-dx * right.z + dy * up.z) * step;
+}
+
+function zoomView(amount) {
+    camera.distance = clamp(camera.distance * Math.exp(amount), MIN_DISTANCE, MAX_DISTANCE);
+}
+
+function resetViewAngle() {
+    camera.yaw = DEFAULT_YAW;
+    camera.pitch = DEFAULT_PITCH;
+}
+
+// Straight down from above, like the old 2D view
+function topView() {
+    camera.yaw = DEFAULT_YAW;
+    camera.pitch = MAX_PITCH;
 }
 
 function fitView(radius) {
     const center = centerOfMass();
     camera.x = center.x;
     camera.y = center.y;
+    camera.z = center.z;
 
     let r = radius;
     if (!r) {
         // Fit 97% of the bodies, so a few that escaped far away don't
         // force the view to zoom all the way out
         const distances = bodies
-            .map(b => Math.hypot(b.x - center.x, b.y - center.y) + b.radius)
+            .map(b => Math.hypot(b.x - center.x, b.y - center.y, b.z - center.z) + b.radius)
             .sort((a, b) => a - b);
         const index = Math.min(distances.length - 1, Math.floor(distances.length * 0.97));
         r = distances.length > 20 ? distances[index] : (distances[distances.length - 1] || 0);
         r = Math.max(r * 1.15, 300);
     }
 
-    const size = Math.min(viewWidth, viewHeight) || 600;
-    camera.zoom = clamp(size / 2 / r, 0.03, 5);
+    // Far enough back that a ball of radius r fits across the narrower side
+    // of the screen: the ball's edge is at angle `halfNarrow` from the centre
+    // of view, so  sin(halfNarrow) = r / distance
+    const halfHeight = Math.tan(FOV * Math.PI / 360);
+    const halfNarrow = Math.atan(Math.min(halfHeight, halfHeight * viewWidth / Math.max(1, viewHeight)) || halfHeight);
+    camera.distance = clamp(r / Math.sin(halfNarrow), MIN_DISTANCE, MAX_DISTANCE);
 }
 
 function updateCameraFollow() {
+    let target = null;
     if (camera.follow === "com" && bodies.length > 0) {
-        const c = centerOfMass();
-        camera.x = c.x;
-        camera.y = c.y;
+        target = centerOfMass();
     } else if (camera.follow === "selected" && selectedBody) {
-        camera.x = selectedBody.x;
-        camera.y = selectedBody.y;
+        target = selectedBody;
     } else if (camera.follow === "body") {
         // The followed body was deleted: stop following
-        if (!camera.target || !bodies.includes(camera.target)) {
+        if (!camera.followed || !bodies.includes(camera.followed)) {
             setCameraFollow("free");
             return;
         }
-        camera.x = camera.target.x;
-        camera.y = camera.target.y;
+        target = camera.followed;
+    }
+    if (target) {
+        camera.x = target.x;
+        camera.y = target.y;
+        camera.z = target.z;
     }
 }
 
@@ -1721,172 +1960,442 @@ function hexToRgb(hex) {
 
 function rgba(hex, alpha) {
     const [r, g, b] = hexToRgb(hex);
-    return `rgba(${r},${g},${b},${alpha})`;
+    return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
 }
 
-function mixColor(hex, target, t) {
-    const [r, g, b] = hexToRgb(hex);
-    const [tr, tg, tb] = target;
-    return `rgb(${Math.round(r + (tr - r) * t)},${Math.round(g + (tg - g) * t)},${Math.round(b + (tb - b) * t)})`;
+// The same colour as three numbers from 0 to 1, for the graphics card
+const colorCache = new Map();
+function rgbFloats(hex) {
+    let rgb = colorCache.get(hex);
+    if (!rgb) {
+        rgb = hexToRgb(hex).map(c => c / 255);
+        colorCache.set(hex, rgb);
+    }
+    return rgb;
 }
 
-const WHITE = [255, 255, 255];
-const BLACK = [0, 0, 0];
+// Black holes are drawn black, but their trails and flashes are orange
+function visibleColor(hex) {
+    return hex === "#111111" ? "#f97316" : hex;
+}
 
-// ---------- Background ----------
+// ---------- Textures (small pictures painted on a canvas) ----------
 
-function buildStarfield() {
-    const w = Math.max(1, Math.round(viewWidth * pixelRatio));
-    const h = Math.max(1, Math.round(viewHeight * pixelRatio));
-    const tile = document.createElement("canvas");
-    tile.width = w;
-    tile.height = h;
-    const t = tile.getContext("2d");
+function makeTexture(size, paint) {
+    const picture = document.createElement("canvas");
+    picture.width = picture.height = size;
+    paint(picture.getContext("2d"), size);
+    return new THREE.CanvasTexture(picture);
+}
+
+// A soft round glow: white in the middle, fading to nothing
+const glowTexture = makeTexture(128, (g, s) => {
+    const fade = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    fade.addColorStop(0, "rgba(255,255,255,1)");
+    fade.addColorStop(0.2, "rgba(255,255,255,0.55)");
+    fade.addColorStop(0.5, "rgba(255,255,255,0.15)");
+    fade.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = fade;
+    g.fillRect(0, 0, s, s);
+});
+
+// A black hole's accretion disk: white-hot at the inner edge, cooling to orange
+const diskTexture = makeTexture(256, (g, s) => {
+    const fade = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    fade.addColorStop(0.3, "rgba(255,244,214,1)");
+    fade.addColorStop(0.42, "rgba(253,186,116,0.9)");
+    fade.addColorStop(0.65, "rgba(249,115,22,0.35)");
+    fade.addColorStop(1, "rgba(249,115,22,0)");
+    g.fillStyle = fade;
+    g.fillRect(0, 0, s, s);
+});
+
+// Bright at the top, fading to nothing at the bottom (comet tails, pulsar beams)
+const fadeTexture = makeTexture(64, (g, s) => {
+    const fade = g.createLinearGradient(0, 0, 0, s);
+    fade.addColorStop(0, "rgba(255,255,255,0.9)");
+    fade.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = fade;
+    g.fillRect(0, 0, s, s);
+});
+
+// ---------- Shapes, shared by every body (each body scales them to its size) ----------
+
+const sphereGeometry = new THREE.SphereGeometry(1, 32, 20);
+const ringGeometry = new THREE.RingGeometry(1.15, 3.6, 96, 1);
+// A cone with its tip at the centre, opening out along -y (tails and beams)
+const coneGeometry = new THREE.ConeGeometry(1, 1, 24, 1, true).translate(0, -0.5, 0);
+const DOWN = new THREE.Vector3(0, -1, 0);
+
+/*
+ * Lumpy asteroid shapes: a ball with bumps. Each bump depends only on the
+ * direction from the centre, so corners shared by neighbouring triangles
+ * move together and the surface has no cracks. Six shapes are enough;
+ * each asteroid also gets its own spin, so they don't look alike.
+ */
+const asteroidShapes = [];
+for (let k = 0; k < 6; k++) {
+    const random = seededRandom(100 + k);
+    const phase = [random() * 6, random() * 6, random() * 6, random() * 6];
+    const shape = new THREE.IcosahedronGeometry(1, 2);
+    const p = shape.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+        const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+        const bump = 0.82 +
+            0.12 * Math.sin(3 * x + phase[0]) * Math.sin(2 * y + phase[1]) +
+            0.1 * Math.sin(4 * z + phase[2]) +
+            0.06 * Math.sin(5 * (x + y) + phase[3]);
+        p.setXYZ(i, x * bump * 1.2, y * bump, z * bump * 0.85);
+    }
+    shape.computeVertexNormals();
+    asteroidShapes.push(shape);
+}
+
+// ---------- Background stars ----------
+
+// Points on a huge sphere that moves with the camera, so they never get closer
+const starfield = (() => {
     const random = seededRandom(42);
-
-    for (let i = 0; i < 260; i++) {
-        const x = random() * w;
-        const y = random() * h;
-        const size = (random() < 0.9 ? 0.6 : 1.3) * pixelRatio;
+    const count = 1800;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+        const z = random() * 2 - 1;
+        const angle = random() * Math.PI * 2;
+        const flat = Math.sqrt(1 - z * z);
+        positions.set([flat * Math.cos(angle), flat * Math.sin(angle), z], i * 3);
         const tint = random();
-        t.fillStyle = tint < 0.15 ? "rgba(191,219,254," : tint < 0.25 ? "rgba(254,240,138," : "rgba(255,255,255,";
-        t.fillStyle += (0.25 + random() * 0.6).toFixed(2) + ")";
-        t.beginPath();
-        t.arc(x, y, size, 0, Math.PI * 2);
-        t.fill();
+        const rgb = tint < 0.15 ? [0.75, 0.86, 1] : tint < 0.25 ? [1, 0.94, 0.54] : [1, 1, 1];
+        const brightness = 0.25 + random() * 0.6;
+        colors.set(rgb.map(c => c * brightness), i * 3);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const points = new THREE.Points(geometry, new THREE.PointsMaterial({
+        size: 1.4, sizeAttenuation: false, vertexColors: true, depthWrite: false
+    }));
+    points.frustumCulled = false;
+    points.renderOrder = -1;
+    scene.add(points);
+    return points;
+})();
+
+// ---------- Lights ----------
+
+// Stars light up the planets around them. Lights are slow to add and remove,
+// so there's a fixed set of four, given to the four heaviest stars.
+scene.add(new THREE.AmbientLight(0xffffff, 0.16));
+const fillLight = new THREE.DirectionalLight(0xffffff, 0); // for systems with no stars
+fillLight.position.set(-1, -1, 2);
+scene.add(fillLight);
+const starLights = [];
+for (let i = 0; i < 4; i++) {
+    const light = new THREE.PointLight(0xffffff, 0, 0, 0); // reaches forever
+    scene.add(light);
+    starLights.push(light);
+}
+const WHITE3 = new THREE.Color(1, 1, 1);
+
+// The stars, collected once per frame in render()
+let lightSources = [];
+
+function updateLights() {
+    const brightest = lightSources.slice().sort((a, b) => b.mass - a.mass).slice(0, starLights.length);
+    starLights.forEach((light, i) => {
+        const star = brightest[i];
+        light.intensity = star ? 1.4 : 0;
+        if (star) {
+            light.position.set(star.x, star.y, star.z);
+            light.color.set(star.color).lerp(WHITE3, 0.6);
+        }
+    });
+    fillLight.intensity = brightest.length ? 0.06 : 0.75;
+}
+
+// The star that shines brightest on `body` (null if there are no stars)
+function brightestStar(body) {
+    let best = null;
+    let bestValue = 0;
+
+    for (const b of lightSources) {
+        if (b === body) continue;
+        const d2 = (b.x - body.x) ** 2 + (b.y - body.y) ** 2 + (b.z - body.z) ** 2 + 1;
+        const value = b.mass / d2;
+        if (value > bestValue) {
+            bestValue = value;
+            best = b;
+        }
+    }
+    return best;
+}
+
+// ---------- Bodies ----------
+
+/*
+ * Galaxy stars and small rocks come in thousands, so they're drawn as
+ * "points" (one dot each, all in a single draw call) instead of 3D balls.
+ */
+function isDot(b) {
+    return b.type === "galaxyStar" || (b.type === "rock" && b.radius < 3);
+}
+
+// body -> its 3D object. (Not keyed by id: ids start again from 1 when a
+// scenario loads, and a new body must never pick up an old body's look.)
+const visuals = new Map();
+
+function glowSprite(color, size, opacity) {
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: glowTexture, color, opacity, transparent: true,
+        blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    sprite.scale.setScalar(size); // in body radii (the whole body is scaled to its radius)
+    return sprite;
+}
+
+function fadingCone(color, opacity) {
+    return new THREE.Mesh(coneGeometry, new THREE.MeshBasicMaterial({
+        map: fadeTexture, color, opacity, transparent: true,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+    }));
+}
+
+// Build the 3D object for a body. It's a group of parts, scaled to the body's radius.
+function makeVisual(b) {
+    const group = new THREE.Group();
+    const color = new THREE.Color(b.color);
+
+    if (b.type === "star") {
+        group.add(new THREE.Mesh(sphereGeometry, new THREE.MeshBasicMaterial({ color: color.clone().lerp(WHITE3, 0.35) })));
+        group.add(glowSprite(b.color, 7, 0.9));
+
+    } else if (b.type === "blackhole") {
+        // Black ball, a flat glowing disk of gas spiralling in, and a faint glow
+        group.add(new THREE.Mesh(sphereGeometry, new THREE.MeshBasicMaterial({ color: 0x000000 })));
+        group.add(new THREE.Mesh(ringGeometry, new THREE.MeshBasicMaterial({
+            map: diskTexture, transparent: true, blending: THREE.AdditiveBlending,
+            depthWrite: false, side: THREE.DoubleSide
+        })));
+        group.add(glowSprite("#f97316", 6, 0.3));
+
+    } else if (b.type === "neutronstar") {
+        // A tiny hot ball with two beams, sweeping round like a lighthouse (a pulsar)
+        group.add(new THREE.Mesh(sphereGeometry, new THREE.MeshBasicMaterial({ color: 0xf5f3ff })));
+        group.add(glowSprite(b.color, 6, 0.8));
+        const beams = new THREE.Group();
+        beams.name = "beams";
+        beams.rotation.order = "ZXY"; // tilt first, then spin around z
+        for (const side of [1, -1]) {
+            const beam = fadingCone("#ede9fe", 0.6);
+            beam.rotation.x = -side * Math.PI / 2; // point it along +z or -z
+            beam.scale.set(1.1, 10, 1.1);
+            beams.add(beam);
+        }
+        group.add(beams);
+
+    } else if (b.type === "comet") {
+        // An icy core in a glowing cloud (the coma), and two tails
+        group.add(new THREE.Mesh(sphereGeometry, new THREE.MeshStandardMaterial({ color: 0xe0f2fe, roughness: 0.6 })));
+        group.add(glowSprite(b.color, 5, 0.9));
+        const dust = fadingCone("#fde68a", 0.55);
+        dust.name = "dustTail";
+        const ion = fadingCone("#7dd3fc", 0.8);
+        ion.name = "ionTail";
+        group.add(dust, ion);
+
+    } else if (b.type === "asteroid") {
+        group.add(new THREE.Mesh(asteroidShapes[b.id % asteroidShapes.length],
+            new THREE.MeshStandardMaterial({ color, roughness: 1, flatShading: true })));
+        const random = seededRandom(b.id);
+        group.userData.tumble = [random() - 0.5, random() - 0.5, random() - 0.5];
+
+    } else {
+        // Planets, moons and big rocks: lit by the stars. A little "emissive"
+        // light of their own stops the night side being pure black.
+        group.add(new THREE.Mesh(sphereGeometry, new THREE.MeshStandardMaterial({
+            color, roughness: 0.85, metalness: 0, emissive: color.clone().multiplyScalar(0.07)
+        })));
     }
 
-    starfieldPattern = ctx.createPattern(tile, "repeat");
+    scene.add(group);
+    return group;
 }
 
-function drawStarfield() {
-    if (!starfieldPattern) return;
-    // Stars move slowly when you pan: a little parallax depth effect
-    const offsetX = -camera.x * camera.zoom * 0.05 * pixelRatio;
-    const offsetY = -camera.y * camera.zoom * 0.05 * pixelRatio;
-    ctx.setTransform(1, 0, 0, 1, offsetX % canvas.width, offsetY % canvas.height);
-    ctx.fillStyle = starfieldPattern;
-    ctx.fillRect(-canvas.width, -canvas.height, canvas.width * 3, canvas.height * 3);
-}
-
-function smoothstep(edge0, edge1, x) {
-    const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-    return t * t * (3 - 2 * t);
+function removeVisual(object) {
+    scene.remove(object);
+    // Free the materials (shapes and textures are shared, so they stay)
+    object.traverse(part => {
+        if (part.material) part.material.dispose();
+    });
 }
 
 /*
- * Gravity field: for a grid of points, add up the gravitational potential
- * (G * M / r) from every body. Bright = deep gravity well.
- * The rings are equipotential lines (points with equal potential).
- *
- * Gravity has no edge: it reaches forever and just gets weaker. To keep it
- * fast we calculate one value per small square of pixels, then let the
- * browser blend the squares together smoothly.
+ * A comet's tails point AWAY from the star, not behind the comet:
+ * starlight and the stellar wind push its gas and dust outward.
+ * The closer (hotter) the comet, the more ice boils off: longer tails.
+ *   - Gas (ion) tail: blue, straight away from the star
+ *   - Dust tail: yellowish, bends back along the path a little, because
+ *     heavier dust is pushed less and lags behind
+ * Far from any star the comet is frozen and has no tail.
  */
-const RINGS_PER_LEVEL = 2;
+function updateCometTails(b, group) {
+    const ion = group.getObjectByName("ionTail");
+    const dust = group.getObjectByName("dustTail");
+    const star = brightestStar(b);
+    const away = star ? new THREE.Vector3(b.x - star.x, b.y - star.y, b.z - star.z) : null;
+    const distance = away ? away.length() : 0;
+    const length = star ? Math.min(260, 6000 * (star.mass / 10000) / Math.max(distance, 1)) : 0;
 
-function drawField() {
-    const n = bodies.length;
+    ion.visible = dust.visible = length > b.radius;
+    if (!ion.visible) return;
 
-    // Big systems use the Barnes-Hut tree here too (about 50 pulls per
-    // square instead of n)
-    const useTreeForField = n > FIELD_TREE_LIMIT;
+    away.divideScalar(distance);
+    const motion = new THREE.Vector3(b.vx - star.vx, b.vy - star.vy, b.vz - star.vz);
+    const behind = away.clone().addScaledVector(motion.normalize(), -0.5).normalize();
 
-    // Big systems: the glow changes slowly, so only recalculate it every
-    // other frame and reuse the last picture in between
-    if (useTreeForField && frameCount % 2 === 1 && fieldImage) {
-        useScreenTransform();
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(fieldCanvas, 0, 0, fieldCanvas.width * lastFieldCell, fieldCanvas.height * lastFieldCell);
-        return;
-    }
-    if (useTreeForField) buildTree(bodies);
+    // Sizes are in comet radii, because the whole group is scaled to the radius
+    const r = b.radius;
+    ion.quaternion.setFromUnitVectors(DOWN, away);
+    ion.scale.set(Math.max(0.7 * r, length * 0.06) / r, length / r, Math.max(0.7 * r, length * 0.06) / r);
+    dust.quaternion.setFromUnitVectors(DOWN, behind);
+    dust.scale.set(Math.max(r, length * 0.12) / r, length * 0.8 / r, Math.max(r, length * 0.12) / r);
+}
 
-    // Square size is chosen so the total work (squares x bodies) stays about
-    // the same: small squares with few bodies, bigger ones with many.
-    const work = useTreeForField ? 50 : n;
-    const cell = clamp(Math.ceil(Math.sqrt(viewWidth * viewHeight * work / 300000)), 3, 8);
-    lastFieldCell = cell;
-    const cols = Math.ceil(viewWidth / cell);
-    const rows = Math.ceil(viewHeight / cell);
+function updateBodies() {
+    const seen = new Set();
 
-    if (fieldCanvas.width !== cols || fieldCanvas.height !== rows) {
-        fieldCanvas.width = cols;
-        fieldCanvas.height = rows;
-        fieldImage = fieldCtx.createImageData(cols, rows);
-    }
-    if (fieldLevels.length !== cols * rows) fieldLevels = new Float32Array(cols * rows);
+    for (const b of bodies) {
+        if (isDot(b)) continue;
+        seen.add(b);
 
-    const eps2 = 15 * 15;
+        let group = visuals.get(b);
+        if (!group) {
+            group = makeVisual(b);
+            visuals.set(b, group);
+        }
+        group.position.set(b.x, b.y, b.z);
+        group.scale.setScalar(b.radius);
 
-    // Pass 1: how deep is the gravity well at each square?
-    // Logarithmic scale: each level up is a doubling of well depth.
-    for (let row = 0; row < rows; row++) {
-        const wy = ((row + 0.5) * cell - viewHeight / 2) / camera.zoom + camera.y;
-
-        for (let col = 0; col < cols; col++) {
-            const wx = ((col + 0.5) * cell - viewWidth / 2) / camera.zoom + camera.x;
-
-            let potential = 0;
-            if (useTreeForField) {
-                // A rough tree setting is fine for a background glow
-                walkTree(wx, wy, -1, 1.3, eps2);
-                potential = -walkPhi / G;
-            } else {
-                for (let k = 0; k < n; k++) {
-                    const b = bodies[k];
-                    const dx = wx - b.x;
-                    const dy = wy - b.y;
-                    potential += b.mass / Math.sqrt(dx * dx + dy * dy + eps2);
-                }
-            }
-
-            fieldLevels[row * cols + col] = Math.log2(1 + G * potential);
+        if (b.type === "asteroid") {
+            const t = group.userData.tumble;
+            group.rotation.set(simTime * t[0] * 0.1, simTime * t[1] * 0.1, simTime * t[2] * 0.1);
+        } else if (b.type === "neutronstar") {
+            group.getObjectByName("beams").rotation.set(0.5, 0, simTime * 0.7 + b.id);
+        } else if (b.type === "comet") {
+            updateCometTails(b, group);
         }
     }
 
-    // Pass 2: colour, plus smooth (anti-aliased) equipotential rings
-    const data = fieldImage.data;
-
-    for (let row = 0; row < rows; row++) {
-        for (let col = 0; col < cols; col++) {
-            const k = row * cols + col;
-            const level = fieldLevels[k];
-
-            // How fast the level changes from one square to the next
-            const left = fieldLevels[col > 0 ? k - 1 : k];
-            const right = fieldLevels[col < cols - 1 ? k + 1 : k];
-            const up = fieldLevels[row > 0 ? k - cols : k];
-            const down = fieldLevels[row < rows - 1 ? k + cols : k];
-            const ringsPerSquare = Math.hypot(right - left, down - up) / 2 * RINGS_PER_LEVEL + 1e-6;
-
-            // Distance to the nearest ring, measured in squares, so every
-            // ring is drawn with the same soft width wherever it is
-            const ringPosition = level * RINGS_PER_LEVEL;
-            const fraction = ringPosition - Math.floor(ringPosition);
-            const distance = Math.min(fraction, 1 - fraction) / ringsPerSquare;
-
-            let line = clamp(1 - distance / 1.2, 0, 1);
-            // Fade out rings that would be packed too tightly to see (e.g. zoomed out near a star)
-            line *= smoothstep(2.5, 6, 1 / ringsPerSquare);
-            // Fade out the faint outermost rings
-            line *= smoothstep(3.2, 4, level) * 0.75;
-
-            const t = clamp((level - 3) / 8, 0, 1);
-
-            const i = k * 4;
-            data[i] = 40 + 160 * t * t + line * 90;
-            data[i + 1] = 25 + 70 * t * t * t + line * 90;
-            data[i + 2] = 90 + 160 * t + line * 70;
-            data[i + 3] = Math.min(255, 200 * t + line * 110);
+    for (const [b, group] of visuals) {
+        if (!seen.has(b)) {
+            removeVisual(group);
+            visuals.delete(b);
         }
     }
+}
 
-    fieldCtx.putImageData(fieldImage, 0, 0);
-    useScreenTransform();
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "low"; // "low" is already smooth when enlarging, and much faster
-    ctx.drawImage(fieldCanvas, 0, 0, cols * cell, rows * cell);
+// ---------- Dots (galaxy stars and rocks) ----------
+
+/*
+ * A tiny program for the graphics card that draws each dot as a round spot.
+ * Its size shrinks with distance like a real ball would, but never below a
+ * pixel or two, so faraway stars stay visible.
+ */
+const dotVertexShader = `
+    attribute float size;
+    attribute vec3 tint;
+    uniform float pixelScale;
+    uniform float minSize;
+    varying vec3 vTint;
+    void main() {
+        vTint = tint;
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = max(minSize, size * pixelScale / -viewPosition.z);
+        gl_Position = projectionMatrix * viewPosition;
+    }
+`;
+const dotFragmentShader = `
+    uniform float glow;
+    varying vec3 vTint;
+    void main() {
+        vec2 p = gl_PointCoord * 2.0 - 1.0;
+        float d = dot(p, p);
+        if (d > 1.0) discard;
+        float alpha = glow > 0.5 ? 1.0 - d * d : smoothstep(1.0, 0.6, d);
+        gl_FragColor = vec4(vTint * (1.0 - 0.3 * d * (1.0 - glow)), alpha);
+    }
+`;
+
+function makeDotLayer(glow) {
+    const geometry = new THREE.BufferGeometry();
+    const material = new THREE.ShaderMaterial({
+        uniforms: {
+            pixelScale: { value: 1 },
+            minSize: { value: 1.5 },
+            glow: { value: glow ? 1 : 0 }
+        },
+        vertexShader: dotVertexShader,
+        fragmentShader: dotFragmentShader,
+        transparent: true,
+        // Glowing dots add their light together where they overlap, so the
+        // crowded centre of a galaxy shines brighter, like real photos
+        blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending,
+        depthWrite: !glow
+    });
+    const points = new THREE.Points(geometry, material);
+    points.frustumCulled = false;
+    points.userData.capacity = 0;
+    scene.add(points);
+    return points;
+}
+
+const glowDots = makeDotLayer(true);
+const plainDots = makeDotLayer(false);
+
+function fillDots(points, list) {
+    const geometry = points.geometry;
+    if (points.userData.capacity === 0 || points.userData.capacity < list.length) {
+        const capacity = Math.max(64, list.length * 2);
+        geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+        geometry.setAttribute("tint", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+        geometry.setAttribute("size", new THREE.BufferAttribute(new Float32Array(capacity), 1));
+        points.userData.capacity = capacity;
+    }
+    const position = geometry.attributes.position.array;
+    const tint = geometry.attributes.tint.array;
+    const size = geometry.attributes.size.array;
+
+    list.forEach((b, i) => {
+        position[i * 3] = b.x;
+        position[i * 3 + 1] = b.y;
+        position[i * 3 + 2] = b.z;
+        const rgb = rgbFloats(b.color);
+        tint[i * 3] = rgb[0];
+        tint[i * 3 + 1] = rgb[1];
+        tint[i * 3 + 2] = rgb[2];
+        size[i] = b.radius * 2;
+    });
+    geometry.attributes.position.needsUpdate = true;
+    geometry.attributes.tint.needsUpdate = true;
+    geometry.attributes.size.needsUpdate = true;
+    geometry.setDrawRange(0, list.length);
+
+    // Pixels per unit of size, one unit away from the camera
+    points.material.uniforms.pixelScale.value =
+        view.projectionMatrix.elements[5] * viewHeight * pixelRatio / 2;
+    points.material.uniforms.minSize.value = (points === glowDots ? 2.6 : 1.6) * pixelRatio;
+}
+
+function updateDots() {
+    const glow = [];
+    const plain = [];
+    for (const b of bodies) {
+        if (!isDot(b)) continue;
+        if (b.type === "galaxyStar") glow.push(b);
+        else plain.push(b);
+    }
+    fillDots(glowDots, glow);
+    fillDots(plainDots, plain);
 }
 
 // ---------- Trails ----------
@@ -1906,340 +2415,444 @@ function recordTrails() {
             if (b.trail.length) b.trail = [];
             continue;
         }
-        b.trail.push({ x: b.x, y: b.y });
+        b.trail.push({ x: b.x, y: b.y, z: b.z });
         while (b.trail.length > limit) b.trail.shift();
     }
 }
 
-function drawTrails() {
-    useWorldTransform();
-    ctx.lineWidth = 1.5 / camera.zoom;
-    ctx.lineJoin = "round";
-
-    // Big systems: draw all trails of the same colour in one go (much faster)
-    if (bodies.length > 300) {
-        drawTrailsBatched();
-        return;
-    }
-
-    const chunks = 6;
-
-    for (const b of bodies) {
-        const trail = b.trail;
-        if (trail.length < 2) continue;
-
-        // Draw in pieces that get brighter toward the body (fading tail)
-        const per = Math.ceil(trail.length / chunks);
-
-        for (let c = 0; c < chunks; c++) {
-            const start = c * per;
-            const end = Math.min(trail.length - 1, (c + 1) * per);
-            if (end <= start) continue;
-
-            ctx.beginPath();
-            ctx.moveTo(trail[start].x, trail[start].y);
-            for (let i = start + 1; i <= end; i++) ctx.lineTo(trail[i].x, trail[i].y);
-            ctx.strokeStyle = rgba(b.color === "#111111" ? "#f97316" : b.color, 0.12 + 0.6 * (c + 1) / chunks);
-            ctx.stroke();
-        }
-    }
-}
-
-// Group bodies by colour, so each colour can be drawn with one canvas call
-function groupByColor(list) {
-    const groups = new Map();
-    for (const b of list) {
-        const group = groups.get(b.color);
-        if (group) group.push(b);
-        else groups.set(b.color, [b]);
-    }
-    return groups;
-}
-
-function drawTrailsBatched() {
-    for (const [color, group] of groupByColor(bodies)) {
-        ctx.beginPath();
-        for (const b of group) {
-            const trail = b.trail;
-            if (trail.length < 2) continue;
-            ctx.moveTo(trail[0].x, trail[0].y);
-            for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
-        }
-        ctx.strokeStyle = rgba(color === "#111111" ? "#f97316" : color, 0.4);
-        ctx.stroke();
-    }
-}
-
-// ---------- Bodies ----------
-
-// Tiny rocks and moons are drawn as plain dots, one canvas call per colour
-function isTinyDot(b) {
-    return b.type === "galaxyStar" || (SMALL_TYPES.has(b.type) && b.radius * camera.zoom < 3);
-}
-
-// `glow`: colours add up where dots overlap ("lighter" blending), so the
-// crowded centre of a galaxy glows brighter, like real photos
-function drawDots(list, glow = false) {
-    if (glow) ctx.globalCompositeOperation = "lighter";
-
-    for (const [color, group] of groupByColor(list)) {
-        ctx.beginPath();
-        for (const b of group) {
-            // Galaxy stars stay visible when zoomed out
-            const size = Math.max(b.radius, (glow ? 1.3 : 0.9) / camera.zoom);
-            ctx.rect(b.x - size, b.y - size, size * 2, size * 2);
-        }
-        ctx.fillStyle = glow ? rgba(color, 0.85) : color;
-        ctx.fill();
-    }
-
-    ctx.globalCompositeOperation = "source-over";
-}
-
-// Direction toward the brightest nearby star, so planets are lit on that side.
-// `lightSources` is the list of stars, collected once per frame in render().
-let lightSources = [];
-
-// The star that shines brightest on `body` (null if there are no stars)
-function brightestStar(body) {
-    let best = null;
-    let bestValue = 0;
-
-    for (const b of lightSources) {
-        if (b === body) continue;
-        const d2 = (b.x - body.x) ** 2 + (b.y - body.y) ** 2 + 1;
-        const value = b.mass / d2;
-        if (value > bestValue) {
-            bestValue = value;
-            best = b;
-        }
-    }
-    return best;
-}
-
-function lightDirection(body) {
-    const best = brightestStar(body);
-    if (!best) return { x: -0.6, y: -0.6 };
-    const dx = best.x - body.x;
-    const dy = best.y - body.y;
-    const len = Math.hypot(dx, dy) || 1;
-    return { x: dx / len, y: dy / len };
-}
-
-// Planet-style shading: bright on the side facing the star, dark behind
-function shadedFill(b, r) {
-    const light = lightDirection(b);
-    const shade = ctx.createRadialGradient(
-        b.x + light.x * r * 0.45, b.y + light.y * r * 0.45, r * 0.05,
-        b.x, b.y, r * 1.1
-    );
-    shade.addColorStop(0, mixColor(b.color, WHITE, 0.45));
-    shade.addColorStop(0.5, b.color);
-    shade.addColorStop(1, mixColor(b.color, BLACK, 0.75));
-    return shade;
-}
-
-// A lumpy rock: a circle with a bumpy edge. The bumps come from a random
-// generator seeded with the body's id, so each asteroid keeps its own shape
-// every frame. It tumbles slowly as time passes.
-function drawAsteroid(b) {
-    const random = seededRandom(b.id || 1);
-    const tumble = simTime * (random() - 0.5) * 0.06;
-    const corners = 9;
-
-    ctx.beginPath();
-    for (let i = 0; i < corners; i++) {
-        const angle = tumble + i / corners * Math.PI * 2;
-        const bump = b.radius * (0.75 + random() * 0.4);
-        ctx.lineTo(b.x + bump * Math.cos(angle), b.y + bump * Math.sin(angle));
-    }
-    ctx.closePath();
-    ctx.fillStyle = shadedFill(b, b.radius);
-    ctx.fill();
-}
-
-// One comet tail: a fading wedge from the comet in direction (ux, uy)
-function drawTail(b, ux, uy, length, width, color) {
-    const tx = b.x + ux * length;
-    const ty = b.y + uy * length;
-    const fade = ctx.createLinearGradient(b.x, b.y, tx, ty);
-    fade.addColorStop(0, rgba(color, 0.75));
-    fade.addColorStop(1, rgba(color, 0));
-
-    // (-uy, ux) is sideways to the tail
-    ctx.fillStyle = fade;
-    ctx.beginPath();
-    ctx.moveTo(b.x - uy * width * 0.5, b.y + ux * width * 0.5);
-    ctx.lineTo(tx - uy * width * 2.5, ty + ux * width * 2.5);
-    ctx.lineTo(tx + uy * width * 2.5, ty - ux * width * 2.5);
-    ctx.lineTo(b.x + uy * width * 0.5, b.y - ux * width * 0.5);
-    ctx.closePath();
-    ctx.fill();
-}
+const trailLines = new Map(); // body -> its trail line
 
 /*
- * A comet's tail points AWAY from the star, not behind the comet:
- * starlight and the stellar wind push its gas and dust outward.
- * The closer (hotter) the comet, the more ice boils off: longer tail.
- *   - Gas (ion) tail: blue, straight away from the star
- *   - Dust tail: yellowish, bends back along the path a little, because
- *     heavier dust is pushed less and lags behind
- * Far from any star the comet is frozen and has no tail.
+ * Each trail is a line through the body's last few hundred positions.
+ * It fades out toward the old end: the lines are "additive" (their colour
+ * adds to what's behind), so a darker colour looks more see-through.
  */
-function drawComet(b) {
-    const { x, y, radius: r } = b;
-    const star = brightestStar(b);
+function updateTrails() {
+    const seen = new Set();
 
-    if (star) {
-        const dx = x - star.x;
-        const dy = y - star.y;
-        const distance = Math.hypot(dx, dy) || 1;
-        const length = Math.min(260, 6000 * (star.mass / 10000) / distance);
+    if (options.trails) {
+        for (const b of bodies) {
+            const trail = b.trail;
+            if (trail.length < 2) continue;
+            seen.add(b);
 
-        if (length > r) {
-            const ux = dx / distance;
-            const uy = dy / distance;
-            const speed = Math.hypot(b.vx - star.vx, b.vy - star.vy) || 1;
-            let dustX = ux - 0.5 * (b.vx - star.vx) / speed;
-            let dustY = uy - 0.5 * (b.vy - star.vy) / speed;
-            const dustLength = Math.hypot(dustX, dustY) || 1;
-            dustX /= dustLength;
-            dustY /= dustLength;
+            let line = trailLines.get(b);
+            if (!line || line.userData.capacity < trail.length) {
+                if (line) removeVisual(line);
+                const capacity = Math.max(trail.length, TRAIL_LENGTH);
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+                geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+                line = new THREE.Line(geometry, new THREE.LineBasicMaterial({
+                    vertexColors: true, transparent: true,
+                    blending: THREE.AdditiveBlending, depthWrite: false
+                }));
+                line.frustumCulled = false;
+                line.userData.capacity = capacity;
+                scene.add(line);
+                trailLines.set(b, line);
+            }
 
-            ctx.globalCompositeOperation = "lighter";
-            drawTail(b, dustX, dustY, length * 0.8, Math.max(r, length * 0.09), "#fde68a");
-            drawTail(b, ux, uy, length, Math.max(r * 0.7, length * 0.05), "#7dd3fc");
-            ctx.globalCompositeOperation = "source-over";
+            const position = line.geometry.attributes.position.array;
+            const color = line.geometry.attributes.color.array;
+            const rgb = rgbFloats(visibleColor(b.color));
+            const n = trail.length;
+            for (let i = 0; i < n; i++) {
+                const p = trail[i];
+                position[i * 3] = p.x;
+                position[i * 3 + 1] = p.y;
+                position[i * 3 + 2] = p.z;
+                const fade = 0.08 + 0.7 * i / (n - 1);
+                color[i * 3] = rgb[0] * fade;
+                color[i * 3 + 1] = rgb[1] * fade;
+                color[i * 3 + 2] = rgb[2] * fade;
+            }
+            line.geometry.attributes.position.needsUpdate = true;
+            line.geometry.attributes.color.needsUpdate = true;
+            line.geometry.setDrawRange(0, n);
         }
     }
 
-    // Glowing cloud of gas (the coma) around a small icy core
-    const coma = ctx.createRadialGradient(x, y, 0, x, y, r * 2.5);
-    coma.addColorStop(0, "rgba(255,255,255,0.95)");
-    coma.addColorStop(0.3, rgba(b.color, 0.6));
-    coma.addColorStop(1, rgba(b.color, 0));
-    ctx.fillStyle = coma;
-    ctx.beginPath();
-    ctx.arc(x, y, r * 2.5, 0, Math.PI * 2);
-    ctx.fill();
-}
-
-// A pulsar: a tiny, hot core sweeping two beams around like a lighthouse
-function drawNeutronStar(b) {
-    const { x, y, radius: r } = b;
-
-    const glow = ctx.createRadialGradient(x, y, r * 0.3, x, y, r * 3.5);
-    glow.addColorStop(0, rgba(b.color, 0.8));
-    glow.addColorStop(1, rgba(b.color, 0));
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(x, y, r * 3.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    const angle = simTime * 0.7 + b.id;
-    const beamLength = r * 9;
-    ctx.globalCompositeOperation = "lighter";
-    for (const side of [1, -1]) {
-        const ux = side * Math.cos(angle);
-        const uy = side * Math.sin(angle);
-        const beam = ctx.createLinearGradient(x, y, x + ux * beamLength, y + uy * beamLength);
-        beam.addColorStop(0, "rgba(237,233,254,0.8)");
-        beam.addColorStop(1, "rgba(167,139,250,0)");
-        ctx.fillStyle = beam;
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.lineTo(x + ux * beamLength - uy * r * 1.2, y + uy * beamLength + ux * r * 1.2);
-        ctx.lineTo(x + ux * beamLength + uy * r * 1.2, y + uy * beamLength - ux * r * 1.2);
-        ctx.closePath();
-        ctx.fill();
+    for (const [b, line] of trailLines) {
+        if (!seen.has(b)) {
+            removeVisual(line);
+            trailLines.delete(b);
+        }
     }
-    ctx.globalCompositeOperation = "source-over";
-
-    ctx.fillStyle = "#f5f3ff";
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
 }
 
-function drawBody(b) {
-    const { x, y, radius: r } = b;
+// ---------- Predicted orbit (Kepler ellipse) ----------
 
-    // Tiny rocks and moons: a plain dot looks the same at a few pixels wide
-    if (isTinyDot(b)) {
-        drawDots([b]);
-        if (b === selectedBody) drawSelectionRing(b);
+const ORBIT_POINTS = 128;
+const orbitLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({
+    transparent: true, opacity: 0.65, depthWrite: false
+}));
+orbitLine.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array((ORBIT_POINTS + 1) * 3), 3));
+orbitLine.frustumCulled = false;
+scene.add(orbitLine);
+let orbitMarkers = null; // closest and farthest points, marked on the overlay
+
+/*
+ * The ellipse Kepler's laws predict for the selected body (see orbitAround).
+ * It lies flat in the plane at right angles to the angular momentum h, with
+ * the other body at one focus. Measuring the angle (nu) from the closest point:
+ *   distance r = a (1 - e^2) / (1 + e cos(nu))
+ * P points to the closest point, Q is 90 degrees further round (the way it moves).
+ */
+function updatePredictedOrbit() {
+    orbitLine.visible = false;
+    orbitMarkers = null;
+
+    const b = selectedBody;
+    if (!options.orbit || !b || !bodies.includes(b)) return;
+    const other = referenceBody(b);
+    if (!other) return;
+
+    const orbit = orbitAround(b, other);
+    if (!orbit.bound || orbit.e >= 0.999 || orbit.a > 1e6) return;
+
+    const h = new THREE.Vector3(orbit.hx, orbit.hy, orbit.hz);
+    if (h.lengthSq() < 1e-12) return;
+    h.normalize();
+    const P = orbit.e > 1e-6
+        ? new THREE.Vector3(orbit.ex, orbit.ey, orbit.ez).divideScalar(orbit.e)
+        : new THREE.Vector3(b.x - other.x, b.y - other.y, b.z - other.z).normalize();
+    const Q = new THREE.Vector3().crossVectors(h, P);
+
+    const position = orbitLine.geometry.attributes.position;
+    for (let k = 0; k <= ORBIT_POINTS; k++) {
+        const nu = k / ORBIT_POINTS * Math.PI * 2;
+        const r = orbit.a * (1 - orbit.e * orbit.e) / (1 + orbit.e * Math.cos(nu));
+        const c = r * Math.cos(nu);
+        const s = r * Math.sin(nu);
+        position.setXYZ(k,
+            other.x + c * P.x + s * Q.x,
+            other.y + c * P.y + s * Q.y,
+            other.z + c * P.z + s * Q.z);
+    }
+    position.needsUpdate = true;
+    orbitLine.computeLineDistances();
+    orbitLine.material.color.set(visibleColor(b.color));
+    orbitLine.material.dashSize = camera.distance * 0.012;
+    orbitLine.material.gapSize = camera.distance * 0.009;
+    orbitLine.visible = true;
+
+    if (orbit.e > 0.02) {
+        const closest = orbit.a * (1 - orbit.e);
+        const farthest = orbit.a * (1 + orbit.e);
+        orbitMarkers = [
+            { x: other.x + P.x * closest, y: other.y + P.y * closest, z: other.z + P.z * closest },
+            { x: other.x - P.x * farthest, y: other.y - P.y * farthest, z: other.z - P.z * farthest }
+        ];
+    }
+}
+
+// ---------- Reference grid on the flat plane (z = 0) ----------
+
+/*
+ * Faint squares on the middle plane, so you can tell how far above or below
+ * it things are. New bodies are placed on this plane. The squares are a
+ * power of 10 in size, picked to suit how far away the camera is, and the
+ * lines fade out toward the edge. (Each line is split into short pieces,
+ * because colours can only change from one end of a piece to the other.)
+ */
+const grid = (() => {
+    const half = 20;   // lines from -20 to +20 squares
+    const pieces = 40; // pieces per line
+    const positions = [];
+    const colors = [];
+    const shade = (x, y) => {
+        const fade = Math.max(0, 1 - Math.hypot(x, y) / half) ** 2;
+        const bright = (x === 0 || y === 0) ? 0.5 : 0.3; // the axes through the middle are brighter
+        return [0.45 * bright * fade, 0.55 * bright * fade, 0.75 * bright * fade];
+    };
+    for (let k = -half; k <= half; k++) {
+        for (let i = 0; i < pieces; i++) {
+            const a = -half + 2 * half * i / pieces;
+            const b = -half + 2 * half * (i + 1) / pieces;
+            // A piece of the line at x = k, and of the line at y = k
+            positions.push(k, a, 0, k, b, 0, a, k, 0, b, k, 0);
+            colors.push(...shade(k, a), ...shade(k, b), ...shade(a, k), ...shade(b, k));
+        }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({
+        vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    lines.frustumCulled = false;
+    scene.add(lines);
+    return lines;
+})();
+
+function updateGrid() {
+    grid.visible = options.grid && !options.field;
+    if (!grid.visible) return;
+    const spacing = 10 ** Math.floor(Math.log10(camera.distance / 3));
+    grid.scale.setScalar(spacing);
+    grid.position.set(Math.round(camera.x / spacing) * spacing, Math.round(camera.y / spacing) * spacing, 0);
+}
+
+// ---------- Gravity well sheet ----------
+
+/*
+ * Gravity field, shown as a stretched rubber sheet: for a grid of points on
+ * the middle plane, add up the gravitational potential (G * M / r) from every
+ * body, and push the sheet down by that much. Heavy bodies sit in deep
+ * wells; a body rolling around a well is like a planet orbiting.
+ *
+ * Gravity has no edge: it reaches forever and just gets weaker. Depth uses a
+ * logarithmic scale (each step down is a doubling of well depth), otherwise
+ * the wells under stars would be far too deep to see anything else.
+ */
+const SHEET_CELLS = 64;
+
+const sheet = (() => {
+    const n = SHEET_CELLS + 1;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+
+    // Two triangles per square for the see-through surface...
+    const triangles = [];
+    // ...and the edges of the squares for the grid lines
+    const edges = [];
+    for (let row = 0; row < n; row++) {
+        for (let col = 0; col < n; col++) {
+            const k = row * n + col;
+            if (col < n - 1) edges.push(k, k + 1);
+            if (row < n - 1) edges.push(k, k + n);
+            if (col < n - 1 && row < n - 1) triangles.push(k, k + 1, k + n, k + 1, k + n + 1, k + n);
+        }
+    }
+    geometry.setIndex(triangles);
+    const lineGeometry = new THREE.BufferGeometry();
+    lineGeometry.setAttribute("position", geometry.getAttribute("position"));
+    lineGeometry.setAttribute("color", geometry.getAttribute("color"));
+    lineGeometry.setIndex(edges);
+
+    const surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+        vertexColors: true, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false
+    }));
+    const lines = new THREE.LineSegments(lineGeometry, new THREE.LineBasicMaterial({
+        vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false
+    }));
+    surface.frustumCulled = lines.frustumCulled = false;
+
+    const group = new THREE.Group();
+    group.add(surface, lines);
+    group.visible = false;
+    scene.add(group);
+    return { group, geometry, levels: new Float32Array(n * n), ready: false };
+})();
+
+function updateSheet() {
+    sheet.group.visible = options.field && bodies.length > 0;
+    if (!sheet.group.visible) {
+        sheet.ready = false;
         return;
     }
 
-    if (b.type === "star") {
-        const glow = ctx.createRadialGradient(x, y, r * 0.5, x, y, r * 4);
-        glow.addColorStop(0, rgba(b.color, 0.45));
-        glow.addColorStop(0.4, rgba(b.color, 0.12));
-        glow.addColorStop(1, rgba(b.color, 0));
-        ctx.fillStyle = glow;
-        ctx.beginPath();
-        ctx.arc(x, y, r * 4, 0, Math.PI * 2);
-        ctx.fill();
+    // Big systems use the Barnes-Hut tree here too (about 50 pulls per point
+    // instead of n), and only recalculate every third frame
+    const useTreeForField = bodies.length > FIELD_TREE_LIMIT;
+    if (useTreeForField && sheet.ready && frameCount % 3 !== 0) return;
+    if (useTreeForField) buildTree(bodies);
 
-        const core = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, 0, x, y, r);
-        core.addColorStop(0, "#fffbea");
-        core.addColorStop(0.5, b.color);
-        core.addColorStop(1, mixColor(b.color, BLACK, 0.25));
-        ctx.fillStyle = core;
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
+    const n = SHEET_CELLS + 1;
+    const size = camera.distance * 2.2;
+    const cell = size / SHEET_CELLS;
+    // Snap to whole squares, so the grid doesn't slide around as the camera pans
+    const left = Math.round(camera.x / cell) * cell - size / 2;
+    const top = Math.round(camera.y / cell) * cell - size / 2;
+    const eps2 = 15 * 15;
+    const levels = sheet.levels;
+    let lowest = Infinity;
 
-    } else if (b.type === "blackhole") {
-        const disk = ctx.createRadialGradient(x, y, r * 0.9, x, y, r * 3.4);
-        disk.addColorStop(0, "rgba(255,210,140,0.95)");
-        disk.addColorStop(0.25, "rgba(249,115,22,0.55)");
-        disk.addColorStop(1, "rgba(249,115,22,0)");
-        ctx.fillStyle = disk;
-        ctx.beginPath();
-        ctx.arc(x, y, r * 3.4, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = "#000";
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.strokeStyle = "rgba(255,225,180,0.9)";
-        ctx.lineWidth = r * 0.15;
-        ctx.beginPath();
-        ctx.arc(x, y, r * 1.08, 0, Math.PI * 2);
-        ctx.stroke();
-
-    } else if (b.type === "asteroid") {
-        drawAsteroid(b);
-
-    } else if (b.type === "comet") {
-        drawComet(b);
-
-    } else if (b.type === "neutronstar") {
-        drawNeutronStar(b);
-
-    } else {
-        ctx.fillStyle = shadedFill(b, r);
-        ctx.beginPath();
-        ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fill();
+    for (let row = 0; row < n; row++) {
+        const wy = top + row * cell;
+        for (let col = 0; col < n; col++) {
+            const wx = left + col * cell;
+            let potential = 0;
+            if (useTreeForField) {
+                // A rough tree setting is fine for a background picture
+                walkTree(wx, wy, 0, -1, 1.69, eps2);
+                potential = -walkPhi / G;
+            } else {
+                for (const b of bodies) {
+                    const dx = wx - b.x;
+                    const dy = wy - b.y;
+                    potential += b.mass / Math.sqrt(dx * dx + dy * dy + b.z * b.z + eps2);
+                }
+            }
+            const level = Math.log2(1 + G * potential);
+            levels[row * n + col] = level;
+            if (level < lowest) lowest = level;
+        }
     }
 
-    if (b === selectedBody) drawSelectionRing(b);
+    const position = sheet.geometry.attributes.position;
+    const color = sheet.geometry.attributes.color;
+    const depthPerLevel = size * 0.025;
+    for (let k = 0; k < n * n; k++) {
+        const level = levels[k];
+        position.setXYZ(k, left + (k % n) * cell, top + Math.floor(k / n) * cell, -(level - lowest) * depthPerLevel);
+        // Deeper = brighter: purple at the edges to pink-white in the wells
+        const t = clamp((level - 3) / 8, 0, 1);
+        color.setXYZ(k, (60 + 180 * t * t) / 255, (70 + 90 * t * t * t) / 255, (150 + 105 * t) / 255);
+    }
+    position.needsUpdate = true;
+    color.needsUpdate = true;
+    sheet.ready = true;
 }
 
-function drawSelectionRing(b) {
-    ctx.strokeStyle = "rgba(255,255,255,0.9)";
-    ctx.lineWidth = 1.5 / camera.zoom;
-    ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
-    ctx.lineDashOffset = -performance.now() / 60 / camera.zoom;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.radius + 6 / camera.zoom, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
+// ---------- Barnes-Hut tree view ----------
+
+// What the selected body's group used last time the tree was drawn
+let treeView = null;
+
+const treeLines = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+}));
+treeLines.frustumCulled = false;
+treeLines.userData.capacity = 0;
+scene.add(treeLines);
+
+// The 12 edges of a cube, as pairs of corners (corner bits: 1 = +x, 2 = +y, 4 = +z)
+const CUBE_EDGES = [0, 1, 2, 3, 4, 5, 6, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 4, 1, 5, 2, 6, 3, 7];
+
+function updateTreeOverlay() {
+    treeView = null;
+    treeLines.visible = options.tree && bodies.length > 0;
+    if (!treeLines.visible) return;
+
+    buildTree(bodies);
+    const segments = []; // x, y, z, r, g, b for each end of each line
+
+    const line = (a, b, rgb) => segments.push(a.x, a.y, a.z, ...rgb, b.x, b.y, b.z, ...rgb);
+    const box = (k, rgb) => {
+        const h = tree.half[k];
+        const corner = c => ({
+            x: tree.cx[k] + (c & 1 ? h : -h),
+            y: tree.cy[k] + (c & 2 ? h : -h),
+            z: tree.cz[k] + (c & 4 ? h : -h)
+        });
+        for (let e = 0; e < CUBE_EDGES.length; e += 2) line(corner(CUBE_EDGES[e]), corner(CUBE_EDGES[e + 1]), rgb);
+    };
+
+    // Every cube in the tree, faintly
+    for (let k = 0; k < tree.count; k++) box(k, [0.05, 0.065, 0.085]);
+
+    // What the selected body's group uses
+    const i = selectedBody ? bodies.indexOf(selectedBody) : -1;
+    const L = i >= 0 ? leafOfBody(i) : -1;
+    if (L >= 0) {
+        gatherInteractions(L, theta * theta);
+        const orange = [0.98, 0.57, 0.24];
+        const faintOrange = [0.45, 0.26, 0.1];
+        const cyan = [0.13, 0.83, 0.93];
+        const faintCyan = [0.06, 0.38, 0.43];
+
+        // Far cubes, with a line to the point where their mass is counted
+        for (let n = 0; n < groupNodeCount; n++) {
+            const k = groupNodes[n];
+            box(k, faintOrange);
+            line(selectedBody, { x: tree.comX[k], y: tree.comY[k], z: tree.comZ[k] }, orange);
+        }
+        // Nearby bodies, one by one
+        for (let n = 0; n < groupBodyCount; n++) {
+            const b = bodies[groupBodies[n]];
+            if (b !== selectedBody) line(selectedBody, b, faintCyan);
+        }
+        // The selected body's own cube
+        box(L, cyan);
+
+        treeView = { groups: groupNodeCount, singles: groupBodyCount - 1, n: bodies.length };
+    }
+
+    const count = segments.length / 6;
+    const geometry = treeLines.geometry;
+    if (treeLines.userData.capacity === 0 || treeLines.userData.capacity < count) {
+        const capacity = Math.max(64, count * 2);
+        geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+        geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+        treeLines.userData.capacity = capacity;
+    }
+    const position = geometry.attributes.position.array;
+    const color = geometry.attributes.color.array;
+    for (let v = 0; v < count; v++) {
+        position[v * 3] = segments[v * 6];
+        position[v * 3 + 1] = segments[v * 6 + 1];
+        position[v * 3 + 2] = segments[v * 6 + 2];
+        color[v * 3] = segments[v * 6 + 3];
+        color[v * 3 + 1] = segments[v * 6 + 4];
+        color[v * 3 + 2] = segments[v * 6 + 5];
+    }
+    geometry.attributes.position.needsUpdate = true;
+    geometry.attributes.color.needsUpdate = true;
+    geometry.setDrawRange(0, count);
 }
+
+// ---------- Placing new bodies ----------
+
+function placementVelocity(p) {
+    const dragPixels = Math.hypot(
+        p.currentScreen.x - p.startScreen.x,
+        p.currentScreen.y - p.startScreen.y
+    );
+
+    // Just a click: give it a circular orbit around whatever pulls hardest
+    if (dragPixels < 6) {
+        const attractor = dominantAttractor(p.start.x, p.start.y, p.start.z, null);
+        if (!attractor) return { vx: 0, vy: 0, vz: 0, auto: true, attractor: null };
+        const v = circularVelocity(p.start, BODY_TYPES[brush].mass, attractor);
+        return { ...v, auto: true, attractor };
+    }
+
+    // A drag: velocity follows the drag direction and length, along the plane
+    return {
+        vx: (p.current.x - p.start.x) * LAUNCH_SCALE,
+        vy: (p.current.y - p.start.y) * LAUNCH_SCALE,
+        vz: 0,
+        auto: false
+    };
+}
+
+const placementPath = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.55, depthWrite: false
+}));
+placementPath.frustumCulled = false;
+const placementGhost = new THREE.Mesh(sphereGeometry, new THREE.MeshBasicMaterial({
+    transparent: true, opacity: 0.5, depthWrite: false
+}));
+scene.add(placementPath, placementGhost);
+let placementPreview = null; // what the overlay needs: velocity and predicted crash
+
+function updatePlacement() {
+    placementPreview = null;
+    placementPath.visible = placementGhost.visible = false;
+    if (!pointer || pointer.mode !== "place") return;
+
+    const preset = BODY_TYPES[brush];
+    const velocity = placementVelocity(pointer);
+    const prediction = predictPath(pointer.start, velocity);
+    placementPreview = { velocity, hit: prediction.hit };
+
+    placementPath.geometry.setFromPoints(prediction.points.map(p => new THREE.Vector3(p.x, p.y, p.z)));
+    placementPath.computeLineDistances();
+    placementPath.material.dashSize = camera.distance * 0.01;
+    placementPath.material.gapSize = camera.distance * 0.008;
+    placementPath.visible = true;
+
+    placementGhost.position.set(pointer.start.x, pointer.start.y, pointer.start.z);
+    placementGhost.scale.setScalar(preset.radius);
+    placementGhost.material.color.set(visibleColor(preset.color ?? nextPlanetColor()));
+    placementGhost.visible = true;
+}
+
+// ---------- Overlay: flat drawings on top of the 3D view ----------
+// (labels, arrows, the selection ring, collision flashes)
 
 function drawArrow(x1, y1, x2, y2, color, width) {
     const dx = x2 - x1;
@@ -2247,13 +2860,13 @@ function drawArrow(x1, y1, x2, y2, color, width) {
     const len = Math.hypot(dx, dy);
     if (len < 1e-6) return;
 
-    const head = Math.min(len * 0.4, 9 / camera.zoom);
+    const head = Math.min(len * 0.4, 9);
     const ux = dx / len;
     const uy = dy / len;
 
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = width / camera.zoom;
+    ctx.lineWidth = width;
 
     ctx.beginPath();
     ctx.moveTo(x1, y1);
@@ -2268,6 +2881,14 @@ function drawArrow(x1, y1, x2, y2, color, width) {
     ctx.fill();
 }
 
+// An arrow from the body's edge, `length` long in direction (ux, uy, uz), seen in 3D
+function drawArrow3D(b, ux, uy, uz, length, color) {
+    const start = project(b.x + ux * b.radius, b.y + uy * b.radius, b.z + uz * b.radius);
+    const reach = b.radius + length;
+    const end = project(b.x + ux * reach, b.y + uy * reach, b.z + uz * reach);
+    if (start && end) drawArrow(start.x, start.y, end.x, end.y, color, 2);
+}
+
 // Green = velocity, orange = acceleration from gravity
 function drawVectors() {
     if (!accelerationsFresh) {
@@ -2280,79 +2901,57 @@ function drawVectors() {
 
     for (const b of bodies) {
         if (crowded && b !== selectedBody && SMALL_TYPES.has(b.type)) continue;
-        const start = b.radius;
 
-        const speed = Math.hypot(b.vx, b.vy);
+        const speed = Math.hypot(b.vx, b.vy, b.vz);
         if (speed > 1e-3) {
-            const length = Math.min(speed * 6, 220);
-            drawArrow(
-                b.x + b.vx / speed * start, b.y + b.vy / speed * start,
-                b.x + b.vx / speed * (start + length), b.y + b.vy / speed * (start + length),
-                "#4ade80", 2
-            );
+            drawArrow3D(b, b.vx / speed, b.vy / speed, b.vz / speed, Math.min(speed * 6, 220), "#4ade80");
         }
 
         // Square-root scaling keeps arrows readable near a star and far from it
-        const accel = Math.hypot(b.ax, b.ay);
+        const accel = Math.hypot(b.ax, b.ay, b.az);
         if (accel > 1e-4) {
-            const length = Math.min(Math.sqrt(accel) * 45, 90);
-            drawArrow(
-                b.x + b.ax / accel * start, b.y + b.ay / accel * start,
-                b.x + b.ax / accel * (start + length), b.y + b.ay / accel * (start + length),
-                "#fb923c", 2
-            );
+            drawArrow3D(b, b.ax / accel, b.ay / accel, b.az / accel, Math.min(Math.sqrt(accel) * 45, 90), "#fb923c");
         }
     }
 }
 
-/*
- * The ellipse Kepler's laws predict for the selected body (see orbitAround).
- * The ellipse's centre is a distance a * e from the focus (the other body),
- * on the opposite side from the closest point.
- */
-function drawPredictedOrbit() {
+function drawSelectionRing() {
     const b = selectedBody;
     if (!b || !bodies.includes(b)) return;
-    const other = referenceBody(b);
-    if (!other) return;
-
-    const orbit = orbitAround(b, other);
-    if (!orbit.bound || orbit.e >= 0.999 || orbit.a > 1e6) return;
-
-    const centerX = other.x - orbit.a * orbit.ex;
-    const centerY = other.y - orbit.a * orbit.ey;
-    const semiMinor = orbit.a * Math.sqrt(1 - orbit.e * orbit.e);
-    const tilt = Math.atan2(orbit.ey, orbit.ex);
-
-    ctx.strokeStyle = rgba(b.color === "#111111" ? "#f97316" : b.color, 0.55);
-    ctx.lineWidth = 1.5 / camera.zoom;
-    ctx.setLineDash([8 / camera.zoom, 6 / camera.zoom]);
+    const p = project(b.x, b.y, b.z);
+    if (!p) return;
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.lineDashOffset = -performance.now() / 60;
     ctx.beginPath();
-    ctx.ellipse(centerX, centerY, orbit.a, semiMinor, tilt, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, b.radius * p.scale + 6, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
+}
 
-    // Mark the closest and farthest points
-    if (orbit.e > 0.02) {
-        const ux = orbit.ex / orbit.e;
-        const uy = orbit.ey / orbit.e;
-        const size = 3 / camera.zoom;
-        ctx.fillStyle = "rgba(255,255,255,0.8)";
-        for (const distance of [orbit.a * (1 - orbit.e), -orbit.a * (1 + orbit.e)]) {
-            ctx.beginPath();
-            ctx.arc(other.x + ux * distance, other.y + uy * distance, size, 0, Math.PI * 2);
-            ctx.fill();
-        }
+// The closest and farthest points of the predicted orbit
+function drawOrbitMarkers() {
+    if (!orbitMarkers) return;
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    for (const m of orbitMarkers) {
+        const p = project(m.x, m.y, m.z);
+        if (!p) continue;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fill();
     }
 }
 
 function drawEffects() {
     for (const e of effects) {
+        const p = project(e.x, e.y, e.z);
+        if (!p) continue;
         const t = e.age / 40;
-        ctx.strokeStyle = rgba(e.color === "#111111" ? "#f97316" : e.color, 1 - t);
-        ctx.lineWidth = 2.5 / camera.zoom;
+        ctx.strokeStyle = rgba(visibleColor(e.color), 1 - t);
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(e.x, e.y, e.radius + t * 40, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, (e.radius + t * 40) * p.scale, 0, Math.PI * 2);
         ctx.stroke();
     }
     effects.forEach(e => e.age++);
@@ -2361,7 +2960,6 @@ function drawEffects() {
 
 function drawLabels() {
     if (!options.labels) return;
-    useScreenTransform();
     ctx.font = "11px system-ui, sans-serif";
     ctx.textAlign = "center";
 
@@ -2373,92 +2971,59 @@ function drawLabels() {
             if (crowded && SMALL_TYPES.has(b.type)) continue;
             if (veryCrowded && b.type === "planet") continue;
         }
-        const p = worldToScreen(b.x, b.y);
-        if (p.x < -50 || p.y < -50 || p.x > viewWidth + 50 || p.y > viewHeight + 50) continue;
+        const p = project(b.x, b.y, b.z);
+        if (!p || p.x < -50 || p.y < -50 || p.x > viewWidth + 50 || p.y > viewHeight + 50) continue;
 
         ctx.fillStyle = b === selectedBody ? "#ffffff" : "rgba(203,213,225,0.7)";
-        ctx.fillText(b.name, p.x, p.y + b.radius * camera.zoom + 14);
+        ctx.fillText(b.name, p.x, p.y + b.radius * p.scale + 14);
     }
 }
 
-// ---------- Placing new bodies ----------
+function drawPlacementOverlay() {
+    if (!placementPreview) return;
+    const { velocity, hit } = placementPreview;
 
-function placementVelocity(p) {
-    const dragPixels = Math.hypot(
-        p.currentScreen.x - p.startScreen.x,
-        p.currentScreen.y - p.startScreen.y
-    );
-
-    // Just a click: give it a circular orbit around whatever pulls hardest
-    if (dragPixels < 6) {
-        const attractor = dominantAttractor(p.start.x, p.start.y, null);
-        if (!attractor) return { vx: 0, vy: 0, auto: true, attractor: null };
-        const v = circularVelocity(p.start.x, p.start.y, BODY_TYPES[brush].mass, attractor);
-        return { ...v, auto: true, attractor };
+    if (hit) {
+        const p = project(hit.x, hit.y, hit.z);
+        if (p) {
+            ctx.strokeStyle = "#f87171";
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(p.x - 7, p.y - 7);
+            ctx.lineTo(p.x + 7, p.y + 7);
+            ctx.moveTo(p.x + 7, p.y - 7);
+            ctx.lineTo(p.x - 7, p.y + 7);
+            ctx.stroke();
+        }
     }
-
-    // A drag: velocity follows the drag direction and length
-    return {
-        vx: (p.current.x - p.start.x) * LAUNCH_SCALE,
-        vy: (p.current.y - p.start.y) * LAUNCH_SCALE,
-        auto: false
-    };
-}
-
-function drawPlacement() {
-    if (!pointer || pointer.mode !== "place") return;
-
-    const preset = BODY_TYPES[brush];
-    const color = preset.color ?? nextPlanetColor();
-    const velocity = placementVelocity(pointer);
-    const prediction = predictPath(pointer.start, velocity);
-
-    useWorldTransform();
-
-    // Predicted path
-    ctx.setLineDash([6 / camera.zoom, 5 / camera.zoom]);
-    ctx.lineWidth = 1.5 / camera.zoom;
-    ctx.strokeStyle = "rgba(255,255,255,0.55)";
-    ctx.beginPath();
-    prediction.points.forEach((pt, i) => (i === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y)));
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    if (prediction.hit) {
-        const s = 7 / camera.zoom;
-        ctx.strokeStyle = "#f87171";
-        ctx.lineWidth = 2.5 / camera.zoom;
-        ctx.beginPath();
-        ctx.moveTo(prediction.hit.x - s, prediction.hit.y - s);
-        ctx.lineTo(prediction.hit.x + s, prediction.hit.y + s);
-        ctx.moveTo(prediction.hit.x + s, prediction.hit.y - s);
-        ctx.lineTo(prediction.hit.x - s, prediction.hit.y + s);
-        ctx.stroke();
-    }
-
-    // Ghost of the body
-    ctx.globalAlpha = 0.6;
-    drawBody({
-        ...preset, id: 0, type: brush, x: pointer.start.x, y: pointer.start.y,
-        vx: velocity.vx, vy: velocity.vy, color, radius: preset.radius
-    });
-    ctx.globalAlpha = 1;
 
     // Launch arrow
     if (!velocity.auto) {
-        drawArrow(pointer.start.x, pointer.start.y, pointer.current.x, pointer.current.y, "#f8fafc", 2);
+        const a = project(pointer.start.x, pointer.start.y, pointer.start.z);
+        const b = project(pointer.current.x, pointer.current.y, pointer.current.z);
+        if (a && b) drawArrow(a.x, a.y, b.x, b.y, "#f8fafc", 2);
     }
 
     // Text near the cursor
-    useScreenTransform();
     ctx.font = "12px system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.fillStyle = "#e2e8f0";
-    const speed = Math.hypot(velocity.vx, velocity.vy);
+    const speed = Math.hypot(velocity.vx, velocity.vy, velocity.vz);
     const text = velocity.auto
         ? (velocity.attractor ? "Release for a circular orbit around " + velocity.attractor.name : "Release to place at rest")
         : "Speed " + speed.toFixed(2);
     ctx.fillText(text, pointer.currentScreen.x + 14, pointer.currentScreen.y - 12);
+}
+
+function drawOverlay() {
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    ctx.clearRect(0, 0, viewWidth, viewHeight);
+    if (options.vectors) drawVectors();
+    drawOrbitMarkers();
+    drawEffects();
+    drawSelectionRing();
+    drawPlacementOverlay();
+    drawLabels();
 }
 
 // ---------- Energy graph ----------
@@ -2534,121 +3099,26 @@ function drawEnergyChart() {
 
 // ---------- Main render ----------
 
-// ---------- Barnes-Hut tree view ----------
-
-// What the selected body's group used last time the tree was drawn
-let treeView = null;
-
-function drawTreeOverlay() {
-    treeView = null;
-    if (bodies.length === 0) return;
-
-    buildTree(bodies);
-    useWorldTransform();
-
-    // Every square in the tree
-    ctx.lineWidth = 1 / camera.zoom;
-    ctx.strokeStyle = "rgba(148,163,184,0.22)";
-    ctx.beginPath();
-    for (let k = 0; k < tree.count; k++) {
-        const h = tree.half[k];
-        ctx.rect(tree.cx[k] - h, tree.cy[k] - h, 2 * h, 2 * h);
-    }
-    ctx.stroke();
-
-    // What the selected body's group uses
-    if (!selectedBody) return;
-    const i = bodies.indexOf(selectedBody);
-    const L = i >= 0 ? leafOfBody(i) : -1;
-    if (L < 0) return;
-
-    gatherInteractions(L, theta * theta);
-    const sx = selectedBody.x;
-    const sy = selectedBody.y;
-
-    // Far squares: shaded, with a line to the dot where their mass is counted
-    ctx.fillStyle = "rgba(251,146,60,0.10)";
-    ctx.strokeStyle = "rgba(251,146,60,0.75)";
-    ctx.lineWidth = 1.2 / camera.zoom;
-    for (let n = 0; n < groupNodeCount; n++) {
-        const k = groupNodes[n];
-        const h = tree.half[k];
-        ctx.fillRect(tree.cx[k] - h, tree.cy[k] - h, 2 * h, 2 * h);
-        ctx.strokeRect(tree.cx[k] - h, tree.cy[k] - h, 2 * h, 2 * h);
-    }
-
-    ctx.strokeStyle = "rgba(251,146,60,0.35)";
-    ctx.beginPath();
-    for (let n = 0; n < groupNodeCount; n++) {
-        const k = groupNodes[n];
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(tree.comX[k], tree.comY[k]);
-    }
-    ctx.stroke();
-
-    ctx.fillStyle = "#fb923c";
-    for (let n = 0; n < groupNodeCount; n++) {
-        const k = groupNodes[n];
-        ctx.beginPath();
-        ctx.arc(tree.comX[k], tree.comY[k], 3 / camera.zoom, 0, Math.PI * 2);
-        ctx.fill();
-    }
-
-    // Nearby bodies: lines to each one
-    ctx.strokeStyle = "rgba(34,211,238,0.45)";
-    ctx.beginPath();
-    for (let n = 0; n < groupBodyCount; n++) {
-        const b = bodies[groupBodies[n]];
-        if (b === selectedBody) continue;
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(b.x, b.y);
-    }
-    ctx.stroke();
-
-    // The selected body's own square
-    const h = tree.half[L];
-    ctx.strokeStyle = "#22d3ee";
-    ctx.lineWidth = 2 / camera.zoom;
-    ctx.strokeRect(tree.cx[L] - h, tree.cy[L] - h, 2 * h, 2 * h);
-
-    treeView = { groups: groupNodeCount, singles: groupBodyCount - 1, n: bodies.length };
-}
-
 function render() {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = "#02040b";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    updateView();
 
-    drawStarfield();
-
-    if (options.field && bodies.length > 0) drawField();
-
-    if (options.trails) drawTrails();
-
-    if (options.tree) drawTreeOverlay();
+    // The background stars sit on a huge ball around the camera
+    starfield.position.copy(view.position);
+    starfield.scale.setScalar(view.far * 0.8);
 
     lightSources = bodies.filter(b => b.type === "star");
-    useWorldTransform();
-    if (options.orbit) drawPredictedOrbit();
-    const dots = [];
-    const glowDots = [];
-    for (const b of bodies) {
-        if (b === selectedBody || !isTinyDot(b)) continue;
-        if (b.type === "galaxyStar") glowDots.push(b);
-        else dots.push(b);
-    }
-    drawDots(glowDots, true);
-    drawDots(dots);
-    // Bigger bodies (and the selected one) on top
-    for (const b of bodies) {
-        if (b === selectedBody || !isTinyDot(b)) drawBody(b);
-    }
+    updateLights();
+    updateBodies();
+    updateDots();
+    updateTrails();
+    updatePredictedOrbit();
+    updateGrid();
+    updateSheet();
+    updateTreeOverlay();
+    updatePlacement();
 
-    if (options.vectors) drawVectors();
-
-    drawEffects();
-    drawPlacement();
-    drawLabels();
+    renderer.render(scene, view);
+    drawOverlay();
 }
 
 
@@ -2662,8 +3132,10 @@ const radiusSlider = document.getElementById("radiusSlider");
 const radiusInput = document.getElementById("radiusInput");
 const vxInput = document.getElementById("vxInput");
 const vyInput = document.getElementById("vyInput");
+const vzInput = document.getElementById("vzInput");
 const xInput = document.getElementById("xInput");
 const yInput = document.getElementById("yInput");
+const zInput = document.getElementById("zInput");
 const cameraSelect = document.getElementById("cameraSelect");
 const referenceSelects = document.querySelectorAll(".reference-select");
 
@@ -2764,7 +3236,7 @@ function fillBodyMenu(select, fixedOptions, list, prefix, groupLabel) {
 }
 
 function cameraMenuValue() {
-    return camera.follow === "body" && camera.target ? "body:" + camera.target.id : camera.follow;
+    return camera.follow === "body" && camera.followed ? "body:" + camera.followed.id : camera.follow;
 }
 
 function refreshBodyMenus() {
@@ -2780,7 +3252,7 @@ function refreshBodyMenus() {
         select.value = chosen && chosen !== selectedBody ? String(chosen.id) : "auto";
     }
 
-    const followed = camera.follow === "body" ? camera.target : null;
+    const followed = camera.follow === "body" ? camera.followed : null;
     const cameraList = followed && !heavy.includes(followed) ? [...heavy, followed] : heavy;
     fillBodyMenu(cameraSelect, [
         ["free", "Free"],
@@ -2820,7 +3292,7 @@ function refreshSolverStats() {
     }
 
     if (options.tree && treeView) {
-        html += "<br>Selected body's group: <b>" + treeView.groups + "</b> far squares + <b>" +
+        html += "<br>Selected body's group: <b>" + treeView.groups + "</b> far cubes + <b>" +
             treeView.singles + "</b> nearby bodies, instead of " +
             formatCount(treeView.n - 1) + " separate bodies.";
     }
@@ -2876,10 +3348,12 @@ function refreshLiveReadouts(force = false) {
         const vyInput = document.getElementById("vyInput");
         if (force || document.activeElement !== vxInput) vxInput.value = selectedBody.vx.toFixed(2);
         if (force || document.activeElement !== vyInput) vyInput.value = selectedBody.vy.toFixed(2);
+        if (force || document.activeElement !== vzInput) vzInput.value = selectedBody.vz.toFixed(2);
         if (force || document.activeElement !== xInput) xInput.value = selectedBody.x.toFixed(1);
         if (force || document.activeElement !== yInput) yInput.value = selectedBody.y.toFixed(1);
+        if (force || document.activeElement !== zInput) zInput.value = selectedBody.z.toFixed(1);
         document.getElementById("speedReadout").textContent =
-            Math.hypot(selectedBody.vx, selectedBody.vy).toFixed(2);
+            Math.hypot(selectedBody.vx, selectedBody.vy, selectedBody.vz).toFixed(2);
     }
 
     const drift = energyDriftPercent();
@@ -3011,8 +3485,8 @@ function equationCardsHtml(b, other) {
 
     if (b) {
         html += eqCard("Velocity and momentum",
-            eqLine("<i>v</i> = √(<i>v<sub>x</sub></i>² + <i>v<sub>y</sub></i>²)") +
-            eqSub("= √((" + num("vx") + ")² + (" + num("vy") + ")²) = " + num("v", true)) +
+            eqLine("<i>v</i> = √(<i>v<sub>x</sub></i>² + <i>v<sub>y</sub></i>² + <i>v<sub>z</sub></i>²)") +
+            eqSub("= √((" + num("vx") + ")² + (" + num("vy") + ")² + (" + num("vz") + ")²) = " + num("v", true)) +
             eqLine("<i>p</i> = <i>m</i> · <i>v</i>") +
             eqSub("= " + num("m") + " × " + num("v") + " = " + num("p", true)) +
             eqNote("Momentum is how hard something is to stop. Collisions keep the total momentum the same."));
@@ -3072,10 +3546,11 @@ function equationCardsHtml(b, other) {
 
 function equationValues(b, other) {
     const system = measureEnergyFast();
-    let px = 0, py = 0;
+    let px = 0, py = 0, pz = 0;
     for (const body of bodies) {
         px += body.mass * body.vx;
         py += body.mass * body.vy;
+        pz += body.mass * body.vz;
     }
 
     const values = {
@@ -3083,17 +3558,18 @@ function equationValues(b, other) {
         sysKE: system.kinetic,
         sysU: system.potential,
         sysE: system.total,
-        sysP: Math.hypot(px, py)
+        sysP: Math.hypot(px, py, pz)
     };
     if (!b) return values;
 
     // measureEnergyFast() made sure ax, ay and phi are up to date
-    const speed = Math.hypot(b.vx, b.vy);
-    const accel = Math.hypot(b.ax, b.ay);
+    const speed = Math.hypot(b.vx, b.vy, b.vz);
+    const accel = Math.hypot(b.ax, b.ay, b.az);
     Object.assign(values, {
         m: b.mass,
         vx: b.vx,
         vy: b.vy,
+        vz: b.vz,
         v: speed,
         p: b.mass * speed,
         KE: 0.5 * b.mass * speed * speed,
@@ -3103,7 +3579,7 @@ function equationValues(b, other) {
     });
     if (!other) return values;
 
-    const r = Math.hypot(other.x - b.x, other.y - b.y);
+    const r = Math.hypot(other.x - b.x, other.y - b.y, other.z - b.z);
     const softened = r * r + softening * softening;
     const force = G * other.mass * b.mass / softened;
     const orbit = orbitAround(b, other);
@@ -3214,14 +3690,24 @@ function editableBody() {
     return selectedBody;
 }
 
-// ---------- Tools (Select / Pan, or placing a body type) ----------
+// ---------- Tools ----------
 
-// Picking the active tool again, or "select", goes back to Select / Pan
-function setBrush(type) {
-    brush = type === "select" || type === brush ? null : type;
+/*
+ * The tool decides what the left mouse button does on the canvas:
+ *   "observe": look around. Drag to rotate the view, click a body to select
+ *              it. It never moves anything, so you can't wreck a system by
+ *              accident.
+ *   "move":    drag a body to move it (Shift + drag moves it up and down)
+ *   a body type ("planet", "star", ...): drag to throw a new one, click to
+ *              place it on an orbit
+ * Picking the active tool again goes back to Observe.
+ */
+function setTool(name) {
+    tool = name === tool ? "observe" : name;
+    brush = BODY_TYPES[tool] ? tool : null;
 
     document.querySelectorAll(".brush").forEach(btn => {
-        btn.classList.toggle("active", btn.dataset.type === (brush ?? "select"));
+        btn.classList.toggle("active", btn.dataset.type === tool);
     });
 
     if (pointer && pointer.mode === "place") pointer = null;
@@ -3237,20 +3723,25 @@ function updateHint() {
             "<b>Click</b> for an automatic orbit &middot; " +
             "<b>Right-drag</b> to pan &middot; " +
             "<b>Esc</b> to stop placing";
+    } else if (tool === "move") {
+        hint.innerHTML =
+            "<b>Drag a body</b> to move it &middot; " +
+            "<b>Shift + drag</b> to move it up or down &middot; " +
+            "<b>Esc</b> to stop moving";
     } else {
         hint.innerHTML =
-            "<b>Drag</b> to pan &middot; " +
-            "<b>Click</b> a body to inspect it &middot; " +
-            "<b>Drag a body</b> to move it &middot; " +
-            "<b>Scroll</b> to zoom";
+            "<b>Drag</b> to rotate &middot; " +
+            "<b>Right-drag</b> to pan &middot; " +
+            "<b>Scroll</b> to zoom &middot; " +
+            "<b>Click</b> a body to inspect it";
     }
 }
 
 function updateCursor(hovering = false) {
-    if (pointer && (pointer.mode === "pan" || pointer.mode === "drag") && pointer.moved) {
+    if (pointer && pointer.moved) {
         canvas.style.cursor = "grabbing";
     } else if (hovering) {
-        canvas.style.cursor = brush ? "pointer" : "move";
+        canvas.style.cursor = tool === "move" ? "move" : "pointer";
     } else {
         canvas.style.cursor = brush ? "crosshair" : "grab";
     }
@@ -3258,7 +3749,7 @@ function updateCursor(hovering = false) {
 
 function deleteSelected() {
     if (!selectedBody) return;
-    if (camera.target === selectedBody) setCameraFollow("free");
+    if (camera.followed === selectedBody) setCameraFollow("free");
     if (referenceId === selectedBody.id) referenceId = null;
     bodies = bodies.filter(b => b !== selectedBody);
     selectedBody = null;
@@ -3275,8 +3766,9 @@ function bodyAtScreen(sx, sy) {
 
     for (let i = bodies.length - 1; i >= 0; i--) {
         const b = bodies[i];
-        const p = worldToScreen(b.x, b.y);
-        const radius = b.radius * camera.zoom;
+        const p = project(b.x, b.y, b.z);
+        if (!p) continue;
+        const radius = b.radius * p.scale;
         const distance = Math.hypot(sx - p.x, sy - p.y);
         if (distance > Math.max(radius, 7) + 3) continue;
 
@@ -3296,19 +3788,20 @@ function eventPosition(event) {
 
 function setCameraFollow(mode, target = null) {
     camera.follow = mode;
-    camera.target = target;
+    camera.followed = target;
     cameraSelect.value = cameraMenuValue();
 }
 
 // Teleport a body. Its old trail would draw a line across the jump, so it's cleared.
-function moveBody(body, x, y) {
+function moveBody(body, x, y, z) {
     body.x = x;
     body.y = y;
+    body.z = z;
     body.trail = [];
     markSystemChanged();
 }
 
-// Let go of whatever the mouse was doing (placing, panning or dragging)
+// Let go of whatever the mouse was doing (placing, rotating, panning or dragging)
 function cancelPointer() {
     if (pointer && pointer.mode === "drag") finishDrag();
     pointer = null;
@@ -3326,129 +3819,180 @@ function finishDrag() {
 // ---------- Mouse / touch on the canvas ----------
 
 /*
- * Left button:
- *   - on a body: select it (and with the Select / Pan tool, drag to move it)
- *   - Select / Pan tool: drag to pan, click empty space to deselect
- *   - a body type chosen: drag to throw, click for an automatic orbit
- * Right or middle button: always pans
+ * Left button, depending on the tool:
+ *   - Observe: drag to rotate the view, click a body to select it,
+ *     click empty space to deselect
+ *   - Move: drag a body to move it (empty space still rotates the view)
+ *   - a body type: drag to throw, click for an automatic orbit
+ * Right or middle button (or Shift + left, except with Move): pan
+ * Touch screens: one finger works like the left button; two fingers pinch
+ * to zoom and move together to pan.
  */
-function startPan(screen, clickDeselects) {
-    pointer = { mode: "pan", startScreen: screen, lastScreen: screen, moved: false, clickDeselects };
+// Keep receiving this pointer's moves even if it leaves the canvas.
+// (The browser refuses if the pointer is already gone, which is harmless.)
+function capturePointer(event) {
+    try {
+        canvas.setPointerCapture(event.pointerId);
+    } catch (error) {
+        // nothing to capture
+    }
+}
+
+const touches = new Map(); // finger id -> where it is now
+let pinch = null;          // the two fingers' distance apart and middle point, last time
+
+function measurePinch() {
+    const [a, b] = [...touches.values()];
+    return { distance: Math.hypot(a.x - b.x, a.y - b.y), middle: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
 }
 
 canvas.addEventListener("pointerdown", event => {
     const screen = eventPosition(event);
 
-    if (event.button === 1 || event.button === 2) {
-        startPan(screen, false);
+    if (event.pointerType === "touch") {
+        touches.set(event.pointerId, screen);
+        if (touches.size === 2) {
+            // A second finger: stop what the first one started, and pinch instead
+            cancelPointer();
+            pinch = measurePinch();
+            capturePointer(event);
+            return;
+        }
+        if (touches.size > 2) return;
+    }
+    const pan = event.button === 1 || event.button === 2 ||
+        (event.button === 0 && event.shiftKey && tool !== "move");
+
+    if (pan) {
+        pointer = { mode: "pan", startScreen: screen, lastScreen: screen, moved: false };
     } else if (event.button === 0) {
         const hit = bodyAtScreen(screen.x, screen.y);
-        if (hit) {
+        if (hit && tool === "move") {
             selectBody(hit);
-            if (brush) return;
             pointer = { mode: "drag", body: hit, startScreen: screen, lastScreen: screen, moved: false, resume: false };
+        } else if (hit && brush) {
+            selectBody(hit);
+            return;
         } else if (brush) {
-            const world = screenToWorld(screen.x, screen.y);
-            pointer = {
-                mode: "place",
-                start: world,
-                current: world,
-                startScreen: screen,
-                currentScreen: screen
-            };
+            // New bodies go on the flat middle plane (where the grid is)
+            const start = screenToPlane(screen.x, screen.y);
+            if (!start) return;
+            pointer = { mode: "place", start, current: start, startScreen: screen, currentScreen: screen };
         } else {
-            startPan(screen, true);
+            pointer = { mode: "rotate", startScreen: screen, lastScreen: screen, moved: false, clicked: hit };
         }
     } else {
         return;
     }
 
-    canvas.setPointerCapture(event.pointerId);
+    capturePointer(event);
 });
 
 canvas.addEventListener("pointermove", event => {
     const screen = eventPosition(event);
+
+    if (touches.has(event.pointerId)) touches.set(event.pointerId, screen);
+    if (pinch) {
+        if (touches.size < 2) return;
+        const now = measurePinch();
+        zoomView(Math.log(pinch.distance / Math.max(now.distance, 1)));
+        panView(now.middle.x - pinch.middle.x, now.middle.y - pinch.middle.y);
+        pinch = now;
+        return;
+    }
 
     if (!pointer) {
         updateCursor(bodyAtScreen(screen.x, screen.y) !== null);
         return;
     }
 
-    if (pointer.mode === "pan") {
-        // Only count it as a pan once the mouse has moved a few pixels,
-        // so a plain click doesn't count as a pan
-        if (!pointer.moved) {
-            const distance = Math.hypot(screen.x - pointer.startScreen.x, screen.y - pointer.startScreen.y);
-            if (distance < 4) return;
-            pointer.moved = true;
-            setCameraFollow("free");
-            updateCursor();
-        }
-        camera.x -= (screen.x - pointer.lastScreen.x) / camera.zoom;
-        camera.y -= (screen.y - pointer.lastScreen.y) / camera.zoom;
-        pointer.lastScreen = screen;
-    } else if (pointer.mode === "place") {
+    if (pointer.mode === "place") {
         pointer.currentScreen = screen;
-        pointer.current = screenToWorld(screen.x, screen.y);
-    } else if (pointer.mode === "drag") {
-        if (!pointer.moved) {
-            const distance = Math.hypot(screen.x - pointer.startScreen.x, screen.y - pointer.startScreen.y);
-            if (distance < 4) return;
-            pointer.moved = true;
-            // Gravity can't act normally on a body held by the mouse, so the
-            // simulation waits while you drag, then carries on
-            if (running) {
-                running = false;
-                pointer.resume = true;
-                updatePlayButton();
-            }
-            updateCursor();
-        }
-        // Move by how far the mouse moved (this also works while the camera follows the body)
-        const body = pointer.body;
-        if (bodies.includes(body)) {
-            moveBody(body,
-                body.x + (screen.x - pointer.lastScreen.x) / camera.zoom,
-                body.y + (screen.y - pointer.lastScreen.y) / camera.zoom);
-        }
-        pointer.lastScreen = screen;
+        pointer.current = screenToPlane(screen.x, screen.y) ?? pointer.current;
+        return;
     }
+
+    // Only count it as a drag once the mouse has moved a few pixels,
+    // so a plain click doesn't nudge anything
+    if (!pointer.moved) {
+        if (Math.hypot(screen.x - pointer.startScreen.x, screen.y - pointer.startScreen.y) < 4) return;
+        pointer.moved = true;
+        if (pointer.mode === "pan") setCameraFollow("free");
+        // Gravity can't act normally on a body held by the mouse, so the
+        // simulation waits while you drag, then carries on
+        if (pointer.mode === "drag" && running) {
+            running = false;
+            pointer.resume = true;
+            updatePlayButton();
+        }
+        updateCursor();
+    }
+
+    const dx = screen.x - pointer.lastScreen.x;
+    const dy = screen.y - pointer.lastScreen.y;
+
+    if (pointer.mode === "pan") {
+        panView(dx, dy);
+    } else if (pointer.mode === "rotate") {
+        rotateView(dx, dy);
+    } else if (pointer.mode === "drag" && bodies.includes(pointer.body)) {
+        const body = pointer.body;
+        if (event.shiftKey) {
+            // Up and down: one pixel is 1 / scale units at the body's distance
+            const p = project(body.x, body.y, body.z);
+            const step = p ? 1 / p.scale : worldPerPixel();
+            moveBody(body, body.x, body.y, body.z - dy * step);
+        } else {
+            // Slide across the flat plane at the body's height, following the mouse.
+            // Moving by the change in mouse position (not jumping to it) also
+            // works while the camera follows the body.
+            const from = screenToPlane(pointer.lastScreen.x, pointer.lastScreen.y, body.z);
+            const to = screenToPlane(screen.x, screen.y, body.z);
+            if (from && to) moveBody(body, body.x + to.x - from.x, body.y + to.y - from.y, body.z);
+        }
+    }
+    pointer.lastScreen = screen;
 });
 
-canvas.addEventListener("pointerup", () => {
+canvas.addEventListener("pointerup", event => {
+    touches.delete(event.pointerId);
+    if (pinch) {
+        // A pinch ends when a finger lifts; the other finger then does nothing until lifted
+        if (touches.size < 2) pinch = null;
+        return;
+    }
+
     if (pointer && pointer.mode === "place") {
         const velocity = placementVelocity(pointer);
         const body = createBody({
             type: brush,
-            x: pointer.start.x,
-            y: pointer.start.y,
+            ...pointer.start,
             vx: velocity.vx,
-            vy: velocity.vy
+            vy: velocity.vy,
+            vz: velocity.vz
         });
         bodies.push(body);
         markSystemChanged();
         selectBody(body);
-    } else if (pointer && pointer.mode === "pan" && pointer.clickDeselects && !pointer.moved) {
-        selectBody(null);
+    } else if (pointer && pointer.mode === "rotate" && !pointer.moved) {
+        // A click, not a drag: select what was clicked (or nothing)
+        selectBody(pointer.clicked);
     }
     cancelPointer();
 });
 
-canvas.addEventListener("pointercancel", cancelPointer);
+canvas.addEventListener("pointercancel", event => {
+    touches.delete(event.pointerId);
+    if (touches.size < 2) pinch = null;
+    cancelPointer();
+});
 
 canvas.addEventListener("contextmenu", event => event.preventDefault());
 
-// Scroll to zoom toward the mouse cursor
+// Scroll to zoom in and out
 canvas.addEventListener("wheel", event => {
     event.preventDefault();
-    const screen = eventPosition(event);
-    const before = screenToWorld(screen.x, screen.y);
-
-    camera.zoom = clamp(camera.zoom * Math.exp(-event.deltaY * 0.0015), 0.03, 8);
-
-    const after = screenToWorld(screen.x, screen.y);
-    camera.x += before.x - after.x;
-    camera.y += before.y - after.y;
+    zoomView(event.deltaY * 0.0015);
 }, { passive: false });
 
 // ---------- Buttons and inputs ----------
@@ -3523,6 +4067,8 @@ const toggles = {
     vectorToggle: "vectors",
     orbitToggle: "orbit",
     fieldToggle: "field",
+    gridToggle: "grid",
+    spinToggle: "spinView",
     mergeToggle: "merge",
     labelToggle: "labels"
 };
@@ -3541,8 +4087,16 @@ for (const [id, key] of Object.entries(toggles)) {
 }
 
 document.querySelectorAll(".brush").forEach(btn => {
-    btn.onclick = () => setBrush(btn.dataset.type);
+    btn.onclick = () => setTool(btn.dataset.type);
 });
+
+// Switch between looking straight down (like a map) and the tilted 3D view
+function toggleTopView() {
+    if (camera.pitch > 80 * Math.PI / 180) resetViewAngle();
+    else topView();
+}
+
+document.getElementById("topViewBtn").onclick = toggleTopView;
 
 // ---------- Mass, radius and velocity editing ----------
 
@@ -3602,16 +4156,18 @@ radiusInput.addEventListener("change", () => {
 });
 
 // Position boxes move the body when you press Enter or leave the box
-for (const axis of ["x", "y"]) {
+for (const axis of ["x", "y", "z"]) {
     document.getElementById(axis + "Input").addEventListener("change", event => {
         const body = editableBody();
         const value = Number(event.target.value);
         if (!body || event.target.value === "" || !Number.isFinite(value)) return;
-        moveBody(body, axis === "x" ? value : body.x, axis === "y" ? value : body.y);
+        const position = { x: body.x, y: body.y, z: body.z };
+        position[axis] = value;
+        moveBody(body, position.x, position.y, position.z);
     });
 }
 
-for (const axis of ["x", "y"]) {
+for (const axis of ["x", "y", "z"]) {
     document.getElementById("v" + axis + "Input").addEventListener("change", event => {
         const body = editableBody();
         const value = Number(event.target.value);
@@ -3650,7 +4206,7 @@ window.addEventListener("pointerup", stopSliderDrag);
 window.addEventListener("pointercancel", stopSliderDrag);
 
 // Number boxes: editing lasts while the cursor is in the box. Enter finishes.
-for (const input of [massInput, radiusInput, xInput, yInput, vxInput, vyInput]) {
+for (const input of [massInput, radiusInput, xInput, yInput, zInput, vxInput, vyInput, vzInput]) {
     input.addEventListener("focus", () => beginEdit(input.id));
     input.addEventListener("blur", () => endEdit(input.id));
     input.addEventListener("keydown", event => {
@@ -3662,10 +4218,12 @@ document.getElementById("orbitBtn").onclick = () => {
     if (!selectedBody) return;
     const attractor = referenceBody(selectedBody);
     if (!attractor) return;
-    const direction = Number(document.getElementById("orbitDirection").value);
-    const v = circularVelocity(selectedBody.x, selectedBody.y, selectedBody.mass, attractor, direction);
+    const direction = document.getElementById("orbitDirection").value;
+    const v = circularVelocity(selectedBody, selectedBody.mass, attractor,
+        direction === "anticlockwise" ? ANTICLOCKWISE : CLOCKWISE);
     selectedBody.vx = v.vx;
     selectedBody.vy = v.vy;
+    selectedBody.vz = v.vz;
     markSystemChanged();
     refreshLiveReadouts(true);
 };
@@ -3683,8 +4241,16 @@ document.addEventListener("click", event => {
 window.addEventListener("keydown", event => {
     const target = event.target;
     const typing = target.tagName === "SELECT" ||
-        (target.tagName === "INPUT" && target.type === "number");
+        (target.tagName === "INPUT" && (target.type === "number" || target.type === "range"));
     if (typing) return;
+
+    // Arrow keys turn the view (handy while placing bodies, when dragging throws them)
+    const turn = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[event.key];
+    if (turn) {
+        event.preventDefault();
+        rotateView(...turn);
+        return;
+    }
 
     if (event.code === "Space") {
         event.preventDefault();
@@ -3693,8 +4259,12 @@ window.addEventListener("keydown", event => {
         deleteSelected();
     } else if (event.key === "Escape") {
         cancelPointer();
-        setBrush("select");
+        setTool("observe");
         selectBody(null);
+    } else if (event.key === "m" || event.key === "M") {
+        setTool("move");
+    } else if (event.key === "t" || event.key === "T") {
+        toggleTopView();
     } else if (event.key === "r" || event.key === "R") {
         loadScenario(currentScenario);
     } else if (event.key === "f" || event.key === "F") {
@@ -3702,8 +4272,8 @@ window.addEventListener("keydown", event => {
     } else if (event.key === "e" || event.key === "E") {
         showPanelTab(activeTab === "equations" ? "controls" : "equations");
     } else if (/^[1-9]$/.test(event.key) && Number(event.key) <= BRUSH_KEYS.length) {
-        // Pressing the key of the active tool again goes back to Select / Pan
-        setBrush(BRUSH_KEYS[Number(event.key) - 1]);
+        // Pressing the key of the active tool again goes back to Observe
+        setTool(BRUSH_KEYS[Number(event.key) - 1]);
     }
 });
 
@@ -3713,7 +4283,6 @@ window.addEventListener("keydown", event => {
    ========================================================================== */
 
 let lastFrameTime = null;
-let frameCount = 0;
 
 function frame(now) {
     // Real elapsed time, so the simulation runs the same speed on 60 Hz and 120 Hz screens
@@ -3752,6 +4321,9 @@ function frame(now) {
             recordEnergy();
         }
     }
+
+    // "Slowly turn the view": the camera drifts round, for showing off
+    if (options.spinView && !pointer) camera.yaw += elapsed * 0.00006;
 
     updateCameraFollow();
     render();
