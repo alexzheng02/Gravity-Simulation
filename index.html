@@ -47,6 +47,22 @@
             <div class="scenario-note" id="scenarioNote"></div>
 
             <div class="canvas-hint" id="canvasHint"></div>
+
+            <!-- Buttons to move the view: hold one down to keep moving -->
+            <div class="nav-pad" id="navPad" aria-label="Move the view">
+                <button data-move="turnLeft" title="Turn left (&larr;)">&#10226;</button>
+                <button data-move="forward" title="Slide forward (W)">&#9650;</button>
+                <button data-move="turnRight" title="Turn right (&rarr;)">&#10227;</button>
+                <button data-move="up" class="lift" title="Move the view and the grid up (Q)">Up</button>
+                <button data-move="left" title="Slide left (A)">&#9664;</button>
+                <button id="navFit" title="Fit everything in view (F)">&#8982;</button>
+                <button data-move="right" title="Slide right (D)">&#9654;</button>
+                <span class="plane-height" id="planeHeight" title="Height of the grid: new bodies are placed here">z 0</span>
+                <button data-move="zoomOut" title="Zoom out (scroll)">&minus;</button>
+                <button data-move="back" title="Slide back (S)">&#9660;</button>
+                <button data-move="zoomIn" title="Zoom in (scroll)">+</button>
+                <button data-move="down" class="lift" title="Move the view and the grid down (Z)">Down</button>
+            </div>
         </div>
 
         <div class="simulation-controls">
@@ -150,6 +166,15 @@
 
             <p class="solver-stats" id="solverStats"></p>
 
+            <label class="field">
+                Gravity field (a slice through space, at the grid's height)
+                <select id="fieldSelect">
+                    <option value="off">Off</option>
+                    <option value="map">Contour map: glow and rings</option>
+                    <option value="sheet">Rubber sheet: gravity wells</option>
+                </select>
+            </label>
+
             <div class="toggles">
                 <label title="Pauses the simulation while you drag a slider or type in a box, then resumes">
                     <input type="checkbox" id="autoPauseToggle"> Auto-pause while editing
@@ -157,7 +182,6 @@
                 <label><input type="checkbox" id="trailToggle" checked> Trails</label>
                 <label><input type="checkbox" id="vectorToggle"> Force &amp; velocity arrows</label>
                 <label title="The ellipse Kepler's laws predict for the selected body"><input type="checkbox" id="orbitToggle" checked> Predicted orbit (Kepler ellipse)</label>
-                <label><input type="checkbox" id="fieldToggle"> Gravity field (rubber sheet)</label>
                 <label><input type="checkbox" id="gridToggle" checked> Reference grid</label>
                 <label><input type="checkbox" id="spinToggle"> Slowly turn the view</label>
                 <label><input type="checkbox" id="treeToggle"> Show Barnes-Hut tree</label>
@@ -342,15 +366,24 @@
 
             <h3>6. The gravity field</h3>
             <p>
-                The "rubber sheet" shows how deep the gravitational well
-                (the potential, <code>&minus;G&middot;M / r</code>) is at each
-                point of the middle plane. Heavy bodies sit over deep funnels.
-                A body released at rest rolls straight downhill, and an orbit
-                is like a marble circling round a funnel. Gravity has no edge;
-                it reaches forever and just gets weaker, so the sheet flattens
-                out smoothly instead of stopping. The depth uses a
-                logarithmic scale, otherwise stars' wells would be too deep
-                to see anything else.
+                Gravity's "well" (the potential, <code>&minus;G&middot;M / r</code>)
+                fills all of space. In 3D, every body is wrapped in nested
+                shells of equal potential, like the layers of an onion. Drawing
+                every shell would hide everything, so we show a slice through
+                space at the grid's height. Move it up and down (Q / Z) to
+                scan through the field.
+            </p>
+            <p>
+                <b>Contour map</b>: bright means a deep well, and the rings are
+                lines of equal potential. Around a single star they're circles,
+                the slice through its spherical shells. A body released at rest
+                falls straight across them, downhill.
+                <b>Rubber sheet</b>: the same slice, pushed down by the well's
+                depth. An orbit is like a marble circling round a funnel.
+                Gravity has no edge; it reaches forever and just gets weaker,
+                so both fade out smoothly instead of stopping. Depth uses a
+                logarithmic scale, otherwise stars' wells would be too deep to
+                see anything else.
             </p>
 
             <h3>7. Barnes-Hut: thousands of bodies</h3>
@@ -444,6 +477,14 @@
                 Three.js turns the 3D scene into pixels on the graphics card.
                 <b>Observe</b> (Esc) only looks around, so you can't move a
                 body by accident; <b>Move</b> (M) drags bodies.
+            </p>
+            <p>
+                The grid is the <em>working plane</em>: a flat plane at the
+                height the camera looks at. New bodies are placed on it, the
+                gravity field is sliced along it, and the thin lines from each
+                body show how far above or below it they are. Move the view
+                with right-drag, W A S D, Q / Z (up and down) or the buttons on
+                the canvas; Fit View (F) or following a body also sets its height.
             </p>
 
             <h3>Credits</h3>
