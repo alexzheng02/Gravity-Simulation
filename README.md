@@ -1,81 +1,193 @@
-# GravityLab
+# 🪐 GravityLab
 
-An interactive gravity simulator for planets, stars, and black holes. Place bodies, throw them into orbit, and watch how they pull on each other.
+**An interactive 3D gravity simulator** for planets, stars and black holes. Place bodies, throw them into orbit, crash galaxies together, and watch how they pull on each other. Every number on the screen comes from the actual equations, live.
 
-Built for the SPS MathPhys (2026) Hackathon, theme: **Visualization of Physical Processes**.
+Built for the **SPS MathPhys (2026) Hackathon**, theme: **Visualization of Physical Processes**. Our process: **gravity between many bodies** (the N-body problem).
 
 <p align="center">
   <img width="240" height="240" alt="Korone" src="https://github.com/user-attachments/assets/3504b8c8-3786-40ac-af36-3cbcf19f0a61" />
   <img width="450" height="240" alt="image" src="https://github.com/user-attachments/assets/31ae5e7d-0f13-4178-8ae7-f92e78b8f2a1" />
 </p>
 
-## Run it
+<img width="1455" height="731" alt="Screenshot 2026-10-27 at 2 48 56 PM" src="https://github.com/user-attachments/assets/41fc0d2a-bff3-4686-8902-097411a17e41" />
 
-No install needed.
+<!-- **▶ Try it in your browser:** https://alexzheng02.github.io/Gravity-Simulation/ -->
 
-1. Download or clone this repo.
-2. Open `index.html` in any modern browser.
+---
 
-## What you can do
+## 🚀 Running it
 
-- **Throw bodies:** pick Planet, Star, Moon or Black Hole under the canvas, then drag on empty space to launch it. A dashed line previews its path. A quick click gives it a circular orbit.
-- **Select and pan:** the default tool. Drag to move the view, click a body to inspect it. Press Esc (or click the active body type again) to go back to it.
-- **Edit bodies:** change a selected body's mass, radius or velocity with the sliders, or type exact values in the boxes.
-- **Try scenarios:** Solar System, Binary Stars, Figure-8 three-body orbit, Gravity Assist, Black Hole Disk, Random Cluster.
-- **Compare integrators:** switch between Euler and Velocity Verlet and watch the energy graph.
-- **See the physics:** velocity and gravity arrows, a gravity field view with equipotential rings, and a "How it works" panel in the app.
-- **Thousands of bodies:** the Barnes-Hut algorithm (with a tree view) runs Planet Formation with 1,500 rocks.
-- **Galaxy collision:** 3,000 stars show how tidal tails form.
+There's nothing to install or build. It's a web page.
+
+**Option 1: open the file**
+1. Download the project: the green **Code → Download ZIP** button on GitHub, then unzip it. Or clone it:
+   ```bash
+   git clone https://github.com/alexzheng02/Gravity-Simulation.git
+   cd Gravity-Simulation
+   ```
+2. Open `index.html` in a web browser (Chrome, Edge, Firefox or Safari):
+   ```bash
+   start index.html       # Windows
+   open index.html        # macOS
+   xdg-open index.html    # Linux
+   ```
+
+**Option 2: a local web server** (if your browser blocks local files)
+```bash
+python3 -m http.server 8000
+# then visit http://localhost:8000
+```
+
+Keep the `lib/` folder next to `index.html`: it holds Three.js, the 3D drawing library. It's included so the simulator works with no internet connection.
+
+**Needs:** any recent browser with WebGL (practically every computer, tablet and phone from the last 10 years).
+
+---
+
+## ✨ What you can do
+
+- **10 ready-made scenarios** (below), or start from empty space.
+- **Place bodies:** planets, stars, moons, black holes, asteroids, comets (their tails point away from the star) and neutron stars (pulsars). Click for an automatic circular orbit, or drag to throw. A dashed line shows where the new body will go.
+- **Edit anything:** mass, size, position and velocity of any body, by typing, with sliders, or by dragging it on the canvas with the Move tool.
+- **Equations tab:** select a body to see Newton's laws, energy, momentum, escape speed and Kepler's laws, each with **the simulation's live numbers plugged in**.
+- **See gravity itself:**
+  - **Contour map:** glow and rings of equal potential
+  - **Rubber sheet:** how deep the gravity wells are
+  - **Pull sheet:** which way gravity pulls, from above and below
+  - **3D gravity field arrows**
+  - **Force and velocity arrows** on each body
+  - **The predicted Kepler ellipse** for the selected body
+- **See the algorithm:** turn on the Barnes-Hut tree to watch the simulator group distant bodies into cubes, and drag the θ slider to trade accuracy for speed.
+- **Watch the energy graph:** kinetic, potential and total energy, with a live "energy drift" readout that shows how accurate the simulation is.
+- **Undo / redo** any edit, including resetting or switching scenario.
+- **⚙ Options:** trails, labels, grid, background stars, a performance readout and more, saved in your browser.
 
 ### Auto-pause while editing
 
-By default, the simulation keeps running while you edit a body, so you can watch changes take effect live. Tick **Auto-pause while editing** in the Physics panel to pause the simulation while you drag a slider or type in a box. It resumes when you finish, unless you had paused it yourself.
+By default, the simulation keeps running while you edit, so you can watch changes take effect live. If you drag a body with the Move tool, it's held still under the mouse (still pulling on everything else) and carries on with its old velocity when you let go.
 
-### Controls
+Tick **Auto-pause while editing** in **⚙ Options** to pause instead while you place a body, drag one, move a slider or type in a box. It carries on when you finish, unless you had paused it yourself.
 
-| Input | Action |
+<img width="1083" height="532" alt="Screenshot 2026-10-27 at 2 44 07 PM" src="https://github.com/user-attachments/assets/f02eede2-3a2b-4b55-96a9-b895446bfa04" />
+
+---
+
+## 🌌 Scenarios
+
+| Scenario | What it shows |
 |---|---|
-| Drag (Select / Pan tool) | Pan the view |
-| Click a body | Select it |
-| Click empty space | Deselect |
-| 1-4, or the Tool buttons | Pick Planet / Star / Moon / Black Hole |
-| Drag (with a body type picked) | Throw that body |
-| Click (with a body type picked) | Place it in a circular orbit |
-| Esc | Back to Select / Pan |
-| Right-drag | Pan (any tool) |
-| Scroll | Zoom |
-| Space | Play / pause |
-| R / F | Reset / fit view |
-| Delete | Remove selected body |
-| Enter (in a number box) | Apply the value |
+| **Solar System** | A star, five planets on slightly tilted orbits, and a moon. Switch to the Euler integrator and watch the inner planet spiral out. |
+| **Star & Planet** | The simplest orbit: gravity points at the star, velocity is sideways. |
+| **Binary Stars** | Two stars orbiting their shared centre of mass, with planets circling both (like Tatooine). |
+| **Figure-8** | Three equal masses on a famous exact solution of the three-body problem (Moore 1993; Chenciner & Montgomery 2000). It's chaotic, so it eventually breaks apart. |
+| **Gravity Assist** | A trapped probe steals energy from a giant planet and escapes, the trick that sent Voyager to the outer planets. |
+| **Black Hole Disk** | A disk of moons around a black hole, torn apart by a star swooping in from above. |
+| **Random Cluster** | Forty planets in a spinning ball collide, merge and settle into orbits. |
+| **Planet Formation** | 1,500 rocks orbit a young star and merge into planets. |
+| **Galaxy Collision** | Two galaxies of 1,500 stars each. The one spinning the same way it moves throws out long tidal tails; the other barely changes (Toomre & Toomre 1972). |
+| **Asteroid Belt & Comet** | A belt of 180 asteroids and a comet on a stretched, tilted orbit: it speeds up near the star (Kepler's 2nd law) and its tails grow. |
 
-## How it works
+---
 
-**Gravity.** Every pair of bodies pulls on each other with `a = G·M / r²`. Each pair is computed once and applied in opposite directions (Newton's third law).
+## 🎮 Controls
 
-**Time stepping.** The simulation advances in small steps. Two methods are included:
-- *Euler* is simple, but adds a little energy every step, so orbits spiral outward.
-- *Velocity Verlet* is symplectic, so energy error stays small and bounded. Orbits stay closed.
+| Action | Mouse / touch | Keys |
+|---|---|---|
+| Rotate the view | Drag (Observe tool) | ← → ↑ ↓ |
+| Slide the view | Right-drag, Shift + drag, or two fingers | W A S D |
+| Move the view (and the grid) up / down | Pad buttons | Q / Z |
+| Zoom | Scroll, or pinch | Pad + / − |
+| Select a body | Click it | |
+| Move a body | Move tool, then drag (Shift + drag: up/down) | M |
+| Place a body | Pick a type, then click (orbit) or drag (throw) | 1 – 7 |
+| Back to Observe / cancel | | Esc |
+| Play / pause | Play button | Space |
+| Undo / redo | Buttons | Ctrl + Z / Ctrl + Shift + Z |
+| Fit everything in view | Fit View | F |
+| Top view / tilted view | Top View | T |
+| Equations tab | | E |
+| Reset the scenario | Reset | R |
+| Delete the selected body | Delete button | Delete |
+| Apply a typed value | | Enter (in a number box) |
 
-**Energy check.** The graph plots kinetic, potential, and total energy. A flat total line means the simulation is accurate. This is how you can see Euler's error and Verlet's stability.
+The **View controls** panel on the canvas has buttons for all of the view moves, for trackpads and phones.
 
-**Softening.** Distance is computed as `r² + ε²` so near-collisions don't produce infinite forces.
+---
 
-**Collisions.** Touching bodies merge, conserving mass and momentum. Some kinetic energy becomes "heat", marked on the energy graph.
+## 🧮 How it works
 
-**Gravity assist.** The Gravity Assist scenario shows a probe stealing energy from a planet, the way spacecraft like Voyager were sped up.
+The full explanation, written for a general audience, is in the app under **How it works** (bottom of the side panel). In short:
 
-## Files
+1. **Newton's law of gravity.** Every body pulls on every other with F = G·M·m / r². Each pair is visited once and gets equal and opposite pulls (Newton's 3rd law). To stop near-collisions giving infinite kicks, r² becomes r² + ε² (*softening*).
+2. **Velocity Verlet integration.** Time moves in small steps: half a kick to the velocity, move, recompute gravity, the other half kick. This method is *symplectic*, so energy errors stay tiny instead of building up. Simple Euler is included to show why that matters.
+3. **Barnes-Hut algorithm (Barnes & Hut 1986).** Above 200 bodies, space is split into an **octree** of cubes. A far-away cube pulls almost exactly like one body at its centre of mass, so the work grows like n log n instead of n². That turns 4.5 million pairs into about 900,000 pulls per step for 3,000 stars. Bodies in the same small cube share their list of pulls, and a correction step keeps total momentum exactly constant.
+4. **Collisions.** Touching bodies merge. Mass and momentum are conserved exactly; the kinetic energy lost to heat is calculated and allowed for in the energy readout. Collisions are found by *sweep and prune*: bodies are sorted left to right, and each one only checks neighbours that overlap it.
+5. **Energy and orbits.** Kinetic and potential energy are measured every frame. For the selected body, the two-body problem gives its orbit's shape, period and escape speed exactly (Kepler's laws).
+6. **3D drawing.** [Three.js](https://threejs.org) turns the scene into pixels on the graphics card. All the physics is our own code.
 
-- `index.html`: page layout
-- `style.css`: styling
-- `script.js`: physics, rendering, and controls
+## ✅ How we know it's right
 
-## Team
+**34 automated checks** compare the simulator with answers worked out independently, and **all pass**. They cover:
+- Kepler's laws: matched to 0.003% with softening off
+- escape speed
+- conservation of energy and momentum
+- collisions
+- the known figure-8 period: within 0.24%
+- Barnes-Hut against the exact method: 0.17% average force error at the default θ
+
+Full results, and the known approximations, are in **[VALIDATION.md](VALIDATION.md)**. To rerun them yourself:
+
+```bash
+npm install playwright
+npx playwright install chromium
+node tests/validate.js
+```
+
+---
+
+## 📁 Project structure
+
+```
+index.html          The page: layout, panels, scenario list, "How it works"
+script.js           Everything else, in 7 sections:
+                      1. settings and state
+                      2. physics (gravity, octree, time stepping, collisions, energy, orbits)
+                      3. scenarios
+                      4. camera
+                      5. drawing (Three.js)
+                      6. controls (tools, panels, Equations tab, undo, options)
+                      7. the main loop
+style.css           Look and layout (works on phones too)
+lib/                Three.js r149 and its MIT licence
+tests/validate.js   The physics checks
+VALIDATION.md       What the checks found
+docs/               Screenshots for this page
+```
+
+All values are in **simulation units** with G = 1, chosen so numbers stay readable. Real systems would just scale these units.
+
+---
+
+## 🙏 Credits
+
+- **3D drawing:** [Three.js](https://threejs.org) r149, MIT licence (`lib/three-LICENSE.txt`).
+- **Physics and algorithms:**
+  - J. Barnes & P. Hut, *A hierarchical O(N log N) force-calculation algorithm*, Nature 324 (1986)
+  - A. Toomre & J. Toomre, *Galactic bridges and tails*, ApJ 178 (1972)
+  - C. Moore, *Braids in classical dynamics*, Phys. Rev. Lett. 70 (1993)
+  - A. Chenciner & R. Montgomery, *A remarkable periodic solution of the three-body problem*, Annals of Math. 152 (2000)
+  - J. Wisdom, *The resonance overlap criterion and the onset of stochastic behavior in the restricted three-body problem*, AJ 85 (1980)
+- **AI use:** written with help from Claude (Anthropic's AI assistant), as allowed and required to be credited by the hackathon rules.
+
+## 👥 Team
 
 - Alex Zheng
 - Dewa Amandara
 
-## Ideas for next steps
+## 💡 Ideas for next steps
 
-- **Formula display tab:** Add a collapsible section showing equations (F=ma, a=GM/r², KE=½mv², etc)
+- ~~**Formula display tab**: equations like F = ma, a = GM/r², KE = ½mv² with live values~~ ✅ done: the **Equations** tab
+- **Real units**: show distances in AU, masses in Suns and times in years, alongside simulation units
+- **Save and share**: save a system you built to a file or a link, and load it again later
+- **Run physics in the background** (a Web Worker), so huge systems never slow down the controls
+- **General relativity correction**: add the small extra pull that makes Mercury's orbit slowly rotate
