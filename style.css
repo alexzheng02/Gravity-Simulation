@@ -114,6 +114,17 @@ canvas#universe {
     touch-action: none;
 }
 
+/* Labels, arrows and rings, drawn flat on top of the 3D view */
+canvas#overlay {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: calc(100% - 2px);
+    height: calc(100% - 2px);
+    border-radius: 11px;
+    pointer-events: none;
+}
+
 .hud {
     position: absolute;
     top: 10px;
@@ -554,6 +565,25 @@ kbd {
 
 .two-col label.field {
     margin: 6px 0;
+}
+
+.three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+}
+
+.three-col label.field {
+    margin: 6px 0;
+    font-size: 13px;
+}
+
+.three-col input[type="number"] {
+    padding: 6px 6px;
+}
+
+.explainer a {
+    color: var(--accent);
 }
 
 .hidden {
