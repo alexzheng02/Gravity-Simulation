@@ -2,16 +2,29 @@
 
 **An interactive 3D gravity simulator** for planets, stars and black holes. Place bodies, throw them into orbit, crash galaxies together, and watch how they pull on each other. Every number on the screen comes from the actual equations, live.
 
-Built for the **SPS MathPhys (2026) Hackathon**, theme: **Visualization of Physical Processes**. Our process: **gravity between many bodies** (the N-body problem).
-
 <p align="center">
   <img width="240" height="240" alt="Korone" src="https://github.com/user-attachments/assets/3504b8c8-3786-40ac-af36-3cbcf19f0a61" />
   <img width="450" height="240" alt="image" src="https://github.com/user-attachments/assets/31ae5e7d-0f13-4178-8ae7-f92e78b8f2a1" />
 </p>
 
+Built for the **SPS MathPhys (2026) Hackathon**, theme: **Visualization of Physical Processes**. Our process: **gravity between many bodies** (the N-body problem).
+
 <img width="1455" height="731" alt="Screenshot 2026-10-27 at 2 48 56 PM" src="https://github.com/user-attachments/assets/41fc0d2a-bff3-4686-8902-097411a17e41" />
 
-<!-- **▶ Try it in your browser:** https://alexzheng02.github.io/Gravity-Simulation/ -->
+**▶ Try it in your browser:** https://alexzheng02.github.io/Gravity-Simulation/
+
+## Table of Contents
+
+1. [Running it](#-running-it)
+2. [What you can do](#-what-you-can-do)
+3. [Scenarios](#-scenarios)
+4. [Controls](#-controls)
+5. [How it works](#-how-it-works)
+6. [How we know it's right](#-how-we-know-its-right)
+7. [Project structure](#-project-structure)
+8. [Credits](#-credits)
+9. [Team](#-team)
+10. [Ideas for next steps](#-ideas-for-next-steps)
 
 ---
 
