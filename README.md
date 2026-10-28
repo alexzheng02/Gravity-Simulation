@@ -23,10 +23,11 @@ Built for the **SPS MathPhys (2026) Hackathon**, theme: **Visualization of Physi
 4. [Controls](#-controls)
 5. [How it works](#-how-it-works)
 6. [How we know it's right](#-how-we-know-its-right)
-7. [Project structure](#-project-structure)
-8. [Credits](#-credits)
-9. [Team](#-team)
-10. [Ideas for next steps](#-ideas-for-next-steps)
+7. [Tech stack and development process](#-tech-stack-and-development-process)
+8. [Project structure](#-project-structure)
+9. [Credits](#-credits)
+10. [Team](#-team)
+11. [Ideas for next steps](#-ideas-for-next-steps)
 
 ---
 
@@ -160,6 +161,55 @@ node tests/validate.js
 
 ---
 
+## 🛠 Tech stack and development process
+
+### What lumi is built with
+
+lumi is a static, browser-based application. The simulator runs on your device; it does not need a backend, database, account, or build step.
+
+| Layer | Technology | What it does |
+|---|---|---|
+| Page structure | HTML5 | Defines the simulator, inspector, equations and help tabs, and the separate About page. |
+| Interface | CSS, Grid, Flexbox, media queries | Creates the dark space theme and responsive layout. Manrope is bundled locally, alongside the logo, portraits, and demonstration assets. |
+| Application logic | Plain JavaScript | Handles body creation, editing, camera controls, scenarios, undo/redo, and live readouts without a UI framework. |
+| 3D rendering | Three.js r149 / WebGL | Draws bodies, lighting, trails, gravity visualizations, and spatial overlays. Three.js is included in `lib/`. |
+| 2D rendering | Canvas 2D | Draws labels, selection markers, placement hints, and the energy graph. |
+| Physics | Custom JavaScript implementation | Calculates gravitational forces, integrates motion, resolves merging collisions, and derives orbital quantities. Three.js handles graphics, not the physics. |
+| Browser features | Pointer Events, `localStorage`, `IntersectionObserver` | Supports mouse/touch input, remembers display preferences, and reveals About-page sections as you scroll. |
+| Testing | Node.js + Playwright | Opens the actual app in a browser and checks numerical results and placement behavior. These are development tools, not runtime requirements. |
+| Hosting and version control | Git, GitHub, GitHub Pages | Tracks source changes and serves the static site from the repository’s `main` branch. |
+
+### How the code works together
+
+`script.js` is organized into settings, physics, scenarios, camera, drawing, controls, and the main loop. Body objects hold position, velocity, mass, radius, and trail history. The interface edits those objects, the physics updates their motion, and the renderer displays the resulting state.
+
+The main loop uses `requestAnimationFrame` for display updates and an accumulator for fixed-size physics steps. A per-frame work budget limits how long physics can occupy the browser. At larger body counts, the Auto solver switches from calculating every pair to a Barnes-Hut octree; small particles also use simplified rendering and shorter trails.
+
+Undo/redo stores snapshots of the simulation before edits. Display preferences are saved locally in the browser. The About page and help demonstrations have their own small scripts, so they do not need to run a separate application framework.
+
+### How changes are developed and checked
+
+1. **Inspect the existing behavior.** Trace the controls and relevant calculations before changing them. For UI work, preserve the simulation controls and their available options.
+2. **Implement a focused change.** Keep presentation in HTML/CSS, simulation behavior in JavaScript, and reusable assets in the repository. For example, orbit snapping assigns a starting velocity to a new body without changing existing bodies’ velocities or forcing the resulting system to stay stable.
+3. **Check the actual interface.** Use browser checks and screenshots at desktop and mobile sizes. Check navigation, keyboard interaction, image loading, and reduced-motion behavior where relevant. Help images and GIFs are captured from the running app.
+4. **Test numerical behavior.** The 34 physics checks compare results with independent formulas and known solutions. Another 15 placement checks cover orbit-host selection, unstable-moon warnings, velocity inheritance, manual launching, and undo. These tests establish specific behavior; they do not prove every possible system is perfectly modeled.
+5. **Review and publish.** Review the diff, commit with the contributor’s GitHub-linked identity, push to `main`, and check the GitHub Pages build when publishing site changes.
+
+Run both browser-based test suites with:
+
+```bash
+npm install playwright
+npx playwright install chromium
+node tests/validate.js
+node tests/placement.js
+```
+
+If using an installed Chrome browser instead of Playwright’s Chromium, set `BROWSER_CHANNEL=chrome` when running either test script.
+
+AI assistance has been part of development: Claude helped with the original implementation; Codex helped with the lumi redesign, documentation, and later interaction changes. The logo and team illustrations were made with image-generation assistance using supplied references. Browser checks and numerical tests are used to verify changes rather than relying on generated code alone.
+
+---
+
 ## 📁 Project structure
 
 ```
@@ -172,9 +222,15 @@ script.js           Everything else, in 7 sections:
                       5. drawing (Three.js)
                       6. controls (tools, panels, Equations tab, undo, options)
                       7. the main loop
-style.css           Look and layout (works on phones too)
+style.css           Simulator styling and responsive layout
+help.js             Help demo playback and keyboard tab navigation
+about.html          Team, mission, story, and acknowledgments
+about.css           About-page styling
+about.js            Scroll reveals and reduced-motion support
+assets/             Bundled fonts, artwork, and help screenshots/GIF
 lib/                Three.js r149 and its MIT licence
-tests/validate.js   The physics checks
+tests/validate.js   34 physics validation checks
+tests/placement.js  15 placement regression checks
 VALIDATION.md       What the checks found
 docs/               Screenshots for this page
 ```
@@ -192,7 +248,7 @@ All values are in **simulation units** with G = 1, chosen so numbers stay readab
   - C. Moore, *Braids in classical dynamics*, Phys. Rev. Lett. 70 (1993)
   - A. Chenciner & R. Montgomery, *A remarkable periodic solution of the three-body problem*, Annals of Math. 152 (2000)
   - J. Wisdom, *The resonance overlap criterion and the onset of stochastic behavior in the restricted three-body problem*, AJ 85 (1980)
-- **AI use:** written with help from Claude (Anthropic's AI assistant), as allowed and required to be credited by the hackathon rules.
+- **AI use:** developed with assistance from Claude and Codex, with image-generation assistance for the logo and team illustrations. See the development process above for details.
 
 ## 👥 Team
 
