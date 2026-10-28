@@ -62,7 +62,7 @@ Keep the `lib/` folder next to `index.html`: it holds Three.js, the 3D drawing l
 ## ✨ What you can do
 
 - **10 ready-made scenarios** (below), or start from empty space.
-- **Place bodies:** planets, stars, moons, black holes, asteroids, comets (their tails point away from the star) and neutron stars (pulsars). Click for an automatic circular orbit, or drag to throw. A dashed line shows where the new body will go.
+- **Place bodies:** planets, stars, moons, black holes, asteroids, comets (their tails point away from the star) and neutron stars (pulsars). Click to snap into an automatic circular orbit: planets prefer stellar hosts, while moons prefer nearby planets. The preview warns when stellar tides may make a moon’s orbit unstable, without preventing placement. Drag to throw with a manual velocity. A new body never changes the existing bodies’ velocities. Adding mass can destabilize the system: collisions, infall, and ejections remain part of the physics. Massive bodies without a suitable host inherit the system’s average motion rather than being launched around a smaller body. A dashed line shows where the new body will go.
 - **Edit anything:** mass, size, position and velocity of any body, by typing, with sliders, or by dragging it on the canvas with the Move tool.
 - **Equations tab:** select a body to see Newton's laws, energy, momentum, escape speed and Kepler's laws, each with **the simulation's live numbers plugged in**.
 - **See gravity itself:**

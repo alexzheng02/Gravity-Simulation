@@ -194,11 +194,12 @@
     <aside class="control-panel">
 
         <nav class="panel-tabs" role="tablist">
-            <button class="panel-tab active" data-tab="controls" role="tab">Controls</button>
-            <button class="panel-tab" data-tab="equations" role="tab">Equations <kbd>E</kbd></button>
+            <button class="panel-tab active" data-tab="controls" id="tab-button-controls" role="tab" aria-controls="tab-controls" aria-selected="true">Controls</button>
+            <button class="panel-tab" data-tab="equations" id="tab-button-equations" role="tab" aria-controls="tab-equations" aria-selected="false" tabindex="-1">Equations <kbd>E</kbd></button>
+            <button class="panel-tab" data-tab="help" id="tab-button-help" role="tab" aria-controls="tab-help" aria-selected="false" tabindex="-1">Need help?</button>
         </nav>
 
-        <div class="tab-page" id="tab-controls">
+        <div class="tab-page" id="tab-controls" role="tabpanel" aria-labelledby="tab-button-controls">
 
         <details class="panel-section foldable" id="sectionEnergy" open>
             <summary><h2>Energy</h2></summary>
@@ -583,7 +584,7 @@
 
         </div>
 
-        <div class="tab-page hidden" id="tab-equations">
+        <div class="tab-page hidden" id="tab-equations" role="tabpanel" aria-labelledby="tab-button-equations">
             <section class="panel-section">
                 <h2>Live equations</h2>
                 <p class="muted small" id="equationsIntro"></p>
@@ -593,6 +594,125 @@
                 </label>
                 <div id="equationCards"></div>
             </section>
+        </div>
+
+        <div class="tab-page hidden help-page" id="tab-help" role="tabpanel" aria-labelledby="tab-button-help">
+            <div class="help-intro">
+                <p class="help-eyebrow">Your field guide</p>
+                <h2>A little help<br>exploring the stars.</h2>
+                <p>Pick a topic below. Pause whenever you want time to experiment. Your simulation stays here while you read.</p>
+            </div>
+            <details class="help-topic" open>
+                <summary>01 <span>Start, pause &amp; choose a scenario</span></summary>
+                <ol>
+                    <li>Choose a preset from <b>Scenario</b> at the top. <b>Empty Space</b> lets you build from scratch.</li>
+                    <li>Use <b>Pause / Play</b> or <kbd>Space</kbd>. The <b>Speed</b> slider changes how fast simulation time passes.</li>
+                    <li><b>Reset</b> or <kbd>R</kbd> reloads the current preset. Undo can restore the system before a reset or scenario change.</li>
+                </ol>
+                <p class="help-tip">First visit? Try <b>Star &amp; Planet</b>, then <b>Solar System</b>.</p>
+            </details>
+            <details class="help-topic" open>
+                <summary>02 <span>Add a body or throw one</span></summary>
+                <ol>
+                    <li>Choose <b>Planet, Star, Moon, Black Hole, Asteroid, Comet,</b> or <b>Neutron Star</b> beneath the canvas (keys <kbd>1</kbd>–<kbd>7</kbd>).</li>
+                    <li><b>Click empty space</b> on the grid for an automatic orbit. Hold briefly before releasing to read the target and see the predicted path.</li>
+                    <li><b>Drag and release</b> to throw instead: direction follows the drag; a longer drag gives more speed. The dashed path previews the launch and a red × warns of a predicted collision.</li>
+                    <li>Press <kbd>Esc</kbd> or choose <b>Observe</b> to stop placing. Clicking an existing body selects it.</li>
+                </ol>
+                <p class="help-tip"><b>Adding a moon:</b> click near its planet, outside the surface. Check that the preview names the planet. A stellar-tides warning means the moon may escape or crash; snapping does not guarantee stability.</p>
+                <figure class="help-figure">
+                    <img src="assets/help/add-body.png" alt="Moon placement preview showing the target planet and its predicted orbit" loading="lazy" width="900" height="590" id="help-add-image">
+                    <figcaption>Click to orbit; drag to launch.</figcaption>
+                    <button class="help-demo-button" data-demo-image="help-add-image" data-demo-src="assets/help/add-body.gif" data-demo-poster="assets/help/add-body.png" aria-pressed="false">Play demonstration ↗</button>
+                </figure>
+                <p>New bodies affect the whole system. Existing bodies keep their velocities, so adding mass can cause real instability. A massive body without a suitable host inherits the system’s average motion.</p>
+            </details>
+            <details class="help-topic">
+                <summary>03 <span>Look around &amp; follow a body</span></summary>
+                <ul>
+                    <li><b>Observe:</b> drag to rotate; scroll or pinch to zoom. On touch screens, use two fingers to pan.</li>
+                    <li><b>Pan:</b> right-drag, Shift + drag in Observe, or <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>. Arrow keys rotate.</li>
+                    <li><b>Height:</b> <kbd>Q</kbd> / <kbd>Z</kbd> raises / lowers the view and placement grid. New bodies start on that grid.</li>
+                    <li><b>Fit View</b> (<kbd>F</kbd>) brings everything into view. <b>Top View</b> (<kbd>T</kbd>) toggles the overhead view.</li>
+                    <li><b>Camera:</b> follow the center of mass, the selected body, or a named body. Choose <b>Free</b> to explore independently.</li>
+                    <li>Open <b>View controls</b> on the canvas for on-screen movement, rotation, height, and zoom buttons. Hold a button to keep moving.</li>
+                </ul>
+            </details>
+            <details class="help-topic">
+                <summary>04 <span>Select, move, resize &amp; delete</span></summary>
+                <ol>
+                    <li>Click a body on the canvas or in <b>Controls → Bodies</b>. Its properties appear under <b>Selected Body</b>.</li>
+                    <li>Change <b>Mass</b> or <b>Radius</b> with sliders or number boxes. Mass changes gravity; radius changes visible size and the collision boundary.</li>
+                    <li>Edit <b>Position X / Y / Z</b>, or choose <b>Move</b> (<kbd>M</kbd>) and drag the body. Shift + drag moves it vertically.</li>
+                    <li>Use <b>Delete</b> in the inspector or the Delete key to remove the selected body.</li>
+                </ol>
+                <p class="help-tip">The Move tool holds the body while you drag, then releases it with its previous velocity. It still attracts other bodies while held.</p>
+                <figure class="help-figure"><a href="assets/help/body-properties.png" target="_blank" rel="noopener"><img src="assets/help/body-properties.png" alt="Selected Body inspector with mass, radius, position, velocity, and orbit controls" loading="lazy" width="430" height="820"></a><figcaption>Body inspector · click image to enlarge.</figcaption></figure>
+            </details>
+            <details class="help-topic">
+                <summary>05 <span>Change speed &amp; direction</span></summary>
+                <ol>
+                    <li>Select the body, then open <b>Controls → Selected Body</b>.</li>
+                    <li>Edit <b>Velocity X, Y, Z</b>. X and Y are motion across the grid; Z is vertical motion. Negative values reverse an axis’s direction.</li>
+                    <li>Type a number and press <kbd>Enter</kbd> or leave the field to apply it. The <b>Speed</b> readout shows the combined magnitude.</li>
+                </ol>
+                <p class="help-tip">Set all three velocity components to <b>0</b> to stop it momentarily. Gravity immediately accelerates it again when the simulation runs. The global Speed slider changes time, not a body’s velocity.</p>
+            </details>
+            <details class="help-topic">
+                <summary>06 <span>Make an existing body orbit</span></summary>
+                <ol>
+                    <li>Select the body you want to orbit. Place or move it outside its intended host’s surface.</li>
+                    <li>In <b>Selected Body → Orbit around</b>, choose the host explicitly. Select <b>Clockwise</b> or <b>Anticlockwise</b>.</li>
+                    <li>Click <b>Make it orbit</b>. This replaces the selected body’s velocity with a circular-orbit starting velocity relative to that host.</li>
+                </ol>
+                <p>For a moon, choose the planet—not the star. Other bodies can still disturb the orbit. <b>Make it orbit</b> does not move the body or lock its path.</p>
+                <figure class="help-figure"><a href="assets/help/moon-orbit.png" target="_blank" rel="noopener"><img src="assets/help/moon-orbit.png" alt="A moon's Orbit around menu set to its planet, followed by direction and Make it orbit" loading="lazy" width="430" height="340"></a><figcaption>Choose the host, then apply the orbit.</figcaption></figure>
+            </details>
+            <details class="help-topic">
+                <summary>07 <span>Undo, redo &amp; edit while paused</span></summary>
+                <ul>
+                    <li><b>Undo:</b> button or <kbd>Ctrl/⌘ Z</kbd>. <b>Redo:</b> button or <kbd>Ctrl/⌘ Shift Z</kbd>.</li>
+                    <li>Undo rewinds to before an edit, including placements, deletions, resets, and scenario changes.</li>
+                    <li>In <b>Options</b>, enable <b>Auto-pause while editing</b> to pause during placement, movement, sliders, and typing. It resumes afterward unless you paused manually.</li>
+                    <li><b>Clear Trails</b> clears the drawn motion history without changing the bodies.</li>
+                </ul>
+            </details>
+            <details class="help-topic">
+                <summary>08 <span>Show gravity, trails &amp; overlays</span></summary>
+                <p>Open <b>Options</b> at the top to toggle:</p>
+                <ul>
+                    <li><b>Trails / Labels:</b> past motion and body names.</li>
+                    <li><b>Force &amp; velocity arrows:</b> acceleration in orange, velocity in green.</li>
+                    <li><b>Gravity field arrows (3D):</b> the direction gravity pulls throughout space.</li>
+                    <li><b>Predicted orbit:</b> a two-body Kepler ellipse for the selected body and its reference host.</li>
+                    <li><b>Barnes-Hut tree:</b> the spatial groups used by the fast solver.</li>
+                    <li><b>Reference grid / Background stars / Slowly turn the view / Performance readout:</b> scene and display preferences.</li>
+                    <li><b>Collisions merge:</b> touching bodies merge when enabled; disable it to let bodies pass through one another.</li>
+                </ul>
+                <p>Under <b>Controls → Physics → Gravity field</b>, choose <b>Contour map</b> (potential glow and rings), <b>Rubber sheet</b> (well depth), or <b>Pull sheet</b> (pull direction). The slice follows the grid’s height; use <kbd>Q</kbd> / <kbd>Z</kbd> to scan it. Choose <b>Off</b> to hide it.</p>
+                <figure class="help-figure"><a href="assets/help/gravity-field.png" target="_blank" rel="noopener"><img src="assets/help/gravity-field.png" alt="Gravity pull-sheet visualization around a star and its planets" loading="lazy" width="900" height="540"></a><figcaption>Gravity pull sheet · click image to enlarge.</figcaption></figure>
+                <p class="help-tip">Options are saved in this browser. Use <b>Reset to defaults</b> inside Options to restore them, or <b>Done</b> to close the menu.</p>
+            </details>
+            <details class="help-topic">
+                <summary>09 <span>Read equations &amp; energy</span></summary>
+                <ul>
+                    <li>Select a body, then open <b>Equations</b> (<kbd>E</kbd>) or use <b>See the equations for this body</b>.</li>
+                    <li><b>Compared with</b> picks the reference body. This is shared with the inspector’s <b>Orbit around</b> menu.</li>
+                    <li>Read live force, acceleration, kinetic and potential energy, momentum, escape speed, and Kepler orbit values. Numbers use simulation units with <b>G = 1</b>.</li>
+                    <li>Under <b>Controls → Energy</b>, blue is kinetic, red is potential, and white is total energy. Drift estimates numerical error; edits reset its baseline and collision losses are accounted for.</li>
+                </ul>
+                <p class="help-tip">A predicted ellipse assumes an isolated pair. In a system with several bodies, the actual path can differ.</p>
+            </details>
+            <details class="help-topic">
+                <summary>10 <span>Choose a solver &amp; learn more</span></summary>
+                <ul>
+                    <li><b>Integrator:</b> Velocity Verlet is the usual stable choice. Euler demonstrates numerical drift and can cause orbits to spiral outward.</li>
+                    <li><b>Gravity solver:</b> Direct calculates every pair; Barnes-Hut approximates distant groups. Auto switches to Barnes-Hut above 200 bodies.</li>
+                    <li><b>Barnes-Hut accuracy θ:</b> lower is more accurate and slower; higher is faster and more approximate. The solver readout reports work and speedup.</li>
+                    <li>Open <b>How it works</b> at the bottom of Controls for the equations, algorithms, approximations, and validation.</li>
+                    <li>Click section headings to fold Controls sections, or the Scenario / View controls tabs to fold canvas overlays. Find the team and story under <b>About us</b> in the footer.</li>
+                </ul>
+            </details>
         </div>
 
     </aside>
@@ -610,6 +730,7 @@
 
 <script src="lib/three.min.js"></script>
 <script src="script.js"></script>
+<script src="help.js"></script>
 
 </body>
 </html>

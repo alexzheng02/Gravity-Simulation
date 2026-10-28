@@ -14,7 +14,7 @@
 const { chromium } = require('playwright');
 const path = require('path');
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: process.env.BROWSER_CHANNEL || undefined });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const errors = []; page.on('pageerror', e => errors.push(e.stack));
   await page.goto('file://' + path.resolve(__dirname, '..', 'index.html'));

@@ -1174,6 +1174,10 @@ function referenceBody(body) {
         const chosen = bodies.find(b => b.id === referenceId);
         if (chosen) return chosen;
     }
+    if (body.type === "moon") {
+        const planet = placementAttractor(body, "moon", body.mass, body);
+        if (planet) return planet;
+    }
     return dominantAttractor(body.x, body.y, body.z, body);
 }
 
@@ -3267,18 +3271,82 @@ function updateTreeOverlay() {
 
 // ---------- Placing new bodies ----------
 
+// A conservative guide for moon stability, not an enforced physics constraint.
+function moonStableRadius(planet, exclude = null) {
+    let hill = Infinity;
+    for (const other of bodies) {
+        if (other === exclude || other.mass <= planet.mass) continue;
+        const distance = Math.hypot(planet.x - other.x, planet.y - other.y, planet.z - other.z);
+        hill = Math.min(hill, distance * Math.cbrt(planet.mass / (3 * other.mass)));
+    }
+    return 0.4 * hill;
+}
+
+// Only snap to a host at least as massive as the new body, outside contact.
+// Moons near a planet target that planet; stability is a warning, not a gate.
+function placementAttractor(point, type, mass = BODY_TYPES[type].mass, exclude = null) {
+    const candidates = bodies.filter(b => b !== exclude && b.mass >= mass &&
+        Math.hypot(point.x - b.x, point.y - b.y, point.z - b.z) >
+            b.radius + (exclude ? exclude.radius : BODY_TYPES[type].radius));
+    const pull = b => b.mass / ((point.x - b.x) ** 2 + (point.y - b.y) ** 2 +
+        (point.z - b.z) ** 2 + softening ** 2);
+    const strongest = list => list.reduce((best, b) => !best || pull(b) > pull(best) ? b : best, null);
+    if (type === "moon") {
+        const planets = candidates.filter(b => b.type === "planet" && b.mass > mass);
+        // Nearby clicks express intent, even if stellar tides may disrupt the orbit.
+        // Keep the capture region finite for an isolated planet as well.
+        const nearby = planets.filter(planet => {
+            const distance = Math.hypot(point.x - planet.x, point.y - planet.y, point.z - planet.z);
+            const stable = moonStableRadius(planet, exclude);
+            return distance < Math.max(6 * planet.radius, Number.isFinite(stable) ? stable : 0);
+        });
+        if (nearby.length) return nearby.reduce((best, b) => {
+            const distance = host => Math.hypot(point.x - host.x, point.y - host.y, point.z - host.z);
+            return !best || distance(b) < distance(best) ? b : best;
+        }, null);
+        // Away from a planet, use a stellar host instead.
+        const stellar = candidates.filter(b => ["star", "neutronstar", "blackhole"].includes(b.type));
+        return strongest(stellar);
+    }
+    if (type === "planet") {
+        const stellar = candidates.filter(b => ["star", "neutronstar", "blackhole"].includes(b.type));
+        if (stellar.length) return strongest(stellar);
+    }
+    return strongest(candidates);
+}
+
+function placementFrame() {
+    const total = bodies.reduce((sum, b) => sum + b.mass, 0);
+    const frame = { vx: 0, vy: 0, vz: 0 };
+    if (total) for (const b of bodies) for (const key of ["vx", "vy", "vz"]) frame[key] += b.mass * b[key] / total;
+    return { ...frame, mass: total };
+}
+
+// Placement assigns only the new body's velocity. Existing bodies retain
+// their motion: any disruption from the added mass is handled by real gravity.
+function placeNewBody(type, point, velocity) {
+    const body = createBody({ type, ...point, vx: velocity.vx, vy: velocity.vy, vz: velocity.vz });
+    bodies.push(body);
+    markSystemChanged();
+    return body;
+}
+
 function placementVelocity(p) {
     const dragPixels = Math.hypot(
         p.currentScreen.x - p.startScreen.x,
         p.currentScreen.y - p.startScreen.y
     );
 
-    // Just a click: give it a circular orbit around whatever pulls hardest
+    // Just a click: choose a physically plausible host and inherit its motion.
     if (dragPixels < 6) {
-        const attractor = dominantAttractor(p.start.x, p.start.y, p.start.z, null);
-        if (!attractor) return { vx: 0, vy: 0, vz: 0, auto: true, attractor: null };
-        const v = circularVelocity(p.start, BODY_TYPES[brush].mass, attractor);
-        return { ...v, auto: true, attractor };
+        const attractor = placementAttractor(p.start, brush);
+        if (attractor) {
+            const unstable = brush === "moon" && attractor.type === "planet" &&
+                Math.hypot(p.start.x - attractor.x, p.start.y - attractor.y, p.start.z - attractor.z) >= moonStableRadius(attractor);
+            return { ...circularVelocity(p.start, BODY_TYPES[brush].mass, attractor), auto: true, attractor, unstable };
+        }
+        const frame = placementFrame();
+        return { vx: frame.vx, vy: frame.vy, vz: frame.vz, auto: true, attractor: null };
     }
 
     // A drag: velocity follows the drag direction and length, along the plane
@@ -3481,7 +3549,9 @@ function drawPlacementOverlay() {
     ctx.fillStyle = "#e2e8f0";
     const speed = Math.hypot(velocity.vx, velocity.vy, velocity.vz);
     const text = velocity.auto
-        ? (velocity.attractor ? "Release for a circular orbit around " + velocity.attractor.name : "Release to place at rest")
+        ? (velocity.attractor ? "Orbit " + velocity.attractor.name + (velocity.unstable ? " — may be unstable: stellar tides" : " — release to place")
+
+            : "Release to place in the system's reference frame")
         : "Speed " + speed.toFixed(2);
     ctx.fillText(text, pointer.currentScreen.x + 14, pointer.currentScreen.y - 12);
 }
@@ -3888,13 +3958,18 @@ let equationsKey = null;   // which bodies the current cards were built for
 function showPanelTab(name) {
     activeTab = name;
     document.querySelectorAll(".panel-tab").forEach(btn => {
-        btn.classList.toggle("active", btn.dataset.tab === name);
+        const selected = btn.dataset.tab === name;
+        btn.classList.toggle("active", selected);
+        btn.setAttribute("aria-selected", String(selected));
+        btn.tabIndex = selected ? 0 : -1;
     });
-    document.getElementById("tab-controls").classList.toggle("hidden", name !== "controls");
-    document.getElementById("tab-equations").classList.toggle("hidden", name !== "equations");
+    document.querySelectorAll(".tab-page").forEach(page => {
+        page.classList.toggle("hidden", page.id !== "tab-" + name);
+    });
     document.querySelector(".control-panel").scrollTop = 0;
     equationsKey = null;
     refreshEquations();
+    document.dispatchEvent(new CustomEvent("paneltabchange", { detail: name }));
 }
 
 const SUPERSCRIPTS = {
@@ -4600,15 +4675,7 @@ canvas.addEventListener("pointerup", event => {
     if (pointer && pointer.mode === "place") {
         saveUndo("place a " + BODY_TYPES[brush].label.toLowerCase());
         const velocity = placementVelocity(pointer);
-        const body = createBody({
-            type: brush,
-            ...pointer.start,
-            vx: velocity.vx,
-            vy: velocity.vy,
-            vz: velocity.vz
-        });
-        bodies.push(body);
-        markSystemChanged();
+        const body = placeNewBody(brush, pointer.start, velocity);
         selectBody(body);
     } else if (pointer && pointer.mode === "rotate" && !pointer.moved) {
         // A click, not a drag: select what was clicked (or nothing)
@@ -4967,7 +5034,7 @@ document.getElementById("deleteBodyBtn").onclick = deleteSelected;
 // Buttons lose focus after a click so the Space key always means play/pause
 document.addEventListener("click", event => {
     const button = event.target.closest("button");
-    if (button) button.blur();
+    if (button && !button.matches(".panel-tab, .help-demo-button")) button.blur();
 });
 
 // ---------- Panels on the canvas ----------
